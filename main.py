@@ -51,7 +51,7 @@ def init_map():
 def init_character_list():
 	character_list = []
 	for i in range(CHARACTER_AMOUNT):
-		character_list.append(Character(get_random_name(3), 1, random.randint(0, MAP_SIZE), random.randint(0, MAP_SIZE)))
+		character_list.append(Character(get_random_name(3), 1, random.randint(0, MAP_SIZE-1), random.randint(0, MAP_SIZE-1)))
 	return character_list
 
 def populate_map(map, characters):
