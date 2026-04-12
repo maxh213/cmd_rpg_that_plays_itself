@@ -1,22 +1,30 @@
 -module(enemy).
 -export([start/1]).
 
-%% Spawn an enemy process — wanders around the map, slower than characters
-start(WorldPid) ->
-    spawn(fun() -> loop(WorldPid) end).
+-define(BASE_SPEED, 800).
 
-loop(WorldPid) ->
-    receive
-        {tick, _State} ->
-            %% Enemies move less often (50% chance to stay put)
+%% Each enemy is an autonomous process. Higher level enemies move slower.
+start(Level) ->
+    Speed = ?BASE_SPEED + Level * 50,
+    spawn(fun() ->
+        timer:sleep(rand:uniform(Speed)),
+        loop(Speed)
+    end).
+
+loop(Speed) ->
+    case world_server:get_enemy_state(self()) of
+        dead ->
+            ok;
+        undefined ->
+            timer:sleep(100),
+            loop(Speed);
+        {ok, _Info} ->
+            %% 50% chance to stay put, 50% to wander
             Direction = case rand:uniform(2) of
                 1 -> stay;
                 2 -> util:random_direction()
             end,
             world_server:move(self(), Direction),
-            loop(WorldPid);
-        die ->
-            ok
-    after 5000 ->
-        loop(WorldPid)
+            timer:sleep(Speed),
+            loop(Speed)
     end.
