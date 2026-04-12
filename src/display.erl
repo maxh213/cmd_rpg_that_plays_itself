@@ -125,57 +125,80 @@ print_legend() ->
 
 print_roster(Characters) ->
     io:format("~n  ~s~sHeroes:~s\e[K~n", [?BOLD, ?CYAN, ?RESET]),
-    CharList = maps:values(Characters),
-    Sorted = lists:sort(fun(A, B) ->
-        RoleA = role_priority(maps:get(party_role, A, solo)),
-        RoleB = role_priority(maps:get(party_role, B, solo)),
-        case RoleA =:= RoleB of
-            true -> maps:get(level, A) >= maps:get(level, B);
-            false -> RoleA =< RoleB
+    %% Split into parties and solos. Group followers under their leader.
+    {Leaders, Solos, Followers} = maps:fold(fun(Pid, Info, {LAcc, SAcc, FAcc}) ->
+        case maps:get(party_role, Info, solo) of
+            leader -> {[{Pid, Info} | LAcc], SAcc, FAcc};
+            solo -> {LAcc, [Info | SAcc], FAcc};
+            follower -> {LAcc, SAcc, [Info | FAcc]}
         end
-    end, CharList),
+    end, {[], [], []}, Characters),
+    %% Print parties first
+    lists:foreach(fun({_LeaderPid, LeaderInfo}) ->
+        LName = maps:get(name, LeaderInfo),
+        FollowerPids = maps:get(follower_pids, LeaderInfo, []),
+        FollowerNames = [maps:get(name, FI) || FI <- Followers,
+                         lists:any(fun(FPid) ->
+                             case maps:find(FPid, Characters) of
+                                 {ok, FChar} -> maps:get(name, FChar) =:= maps:get(name, FI);
+                                 error -> false
+                             end
+                         end, FollowerPids)],
+        MemberStrs = [LName | FollowerNames],
+        io:format("  ~s~s--- Party: ~s ---~s\e[K~n",
+                  [?BOLD, ?CYAN, string:join(MemberStrs, " + "), ?RESET]),
+        print_hero_line("    ", LeaderInfo),
+        %% Print followers under the leader
+        lists:foreach(fun(FInfo) ->
+            FName = maps:get(name, FInfo),
+            case lists:member(FName, FollowerNames) of
+                true -> print_hero_line("      ", FInfo);
+                false -> ok
+            end
+        end, Followers),
+        io:format("\e[K~n")
+    end, Leaders),
+    %% Print solos
+    SortedSolos = lists:sort(fun(A, B) ->
+        maps:get(level, A) >= maps:get(level, B)
+    end, Solos),
     lists:foreach(fun(Info) ->
-        Name = maps:get(name, Info),
-        Race = maps:get(race, Info, human),
-        RaceStr = util:race_label(Race),
-        Level = maps:get(level, Info),
-        Hp = maps:get(hp, Info),
-        MaxHp = maps:get(max_hp, Info),
-        Exp = maps:get(exp, Info),
-        Needed = combat:exp_to_level(Level),
-        Gold = maps:get(gold, Info, 0),
-        PartyRole = maps:get(party_role, Info, solo),
-        AtkBonus = maps:get(attack_bonus, Info),
-        DefBonus = maps:get(defense_bonus, Info),
-        HpColor = if
-            Hp * 3 < MaxHp -> ?RED;
-            Hp * 3 < MaxHp * 2 -> ?YELLOW;
-            true -> ?GREEN
-        end,
-        BonusStr = case {AtkBonus, DefBonus} of
-            {0, 0} -> "";
-            {A, 0} -> io_lib:format(" +~pATK", [A]);
-            {0, D} -> io_lib:format(" +~pDEF", [D]);
-            {A, D} -> io_lib:format(" +~pATK +~pDEF", [A, D])
-        end,
-        RoleTag = case PartyRole of
-            leader -> io_lib:format(" ~s[LEAD]~s", [?CYAN, ?RESET]);
-            follower -> io_lib:format(" ~s[FOLLOW]~s", [?DIM, ?RESET]);
-            solo -> ""
-        end,
-        Indent = case PartyRole of
-            follower -> "      ";
-            _ -> "    "
-        end,
-        io:format("~s~s~s~s (~s) Lv~p  ~sHP:~p/~p~s  XP:~p/~p  ~s~pg~s~s~s\e[K~n",
-                  [Indent, ?BOLD, Name, ?RESET, RaceStr, Level,
-                   HpColor, Hp, MaxHp, ?RESET,
-                   Exp, Needed, ?YELLOW, Gold, ?RESET, BonusStr, RoleTag])
-    end, Sorted).
+        print_hero_line("    ", Info)
+    end, SortedSolos).
 
-role_priority(leader) -> 1;
-role_priority(solo) -> 2;
-role_priority(follower) -> 3.
+print_hero_line(Indent, Info) ->
+    Name = maps:get(name, Info),
+    Race = maps:get(race, Info, human),
+    RaceStr = util:race_label(Race),
+    Level = maps:get(level, Info),
+    Hp = maps:get(hp, Info),
+    MaxHp = maps:get(max_hp, Info),
+    Exp = maps:get(exp, Info),
+    Needed = combat:exp_to_level(Level),
+    Gold = maps:get(gold, Info, 0),
+    PartyRole = maps:get(party_role, Info, solo),
+    AtkBonus = maps:get(attack_bonus, Info),
+    DefBonus = maps:get(defense_bonus, Info),
+    HpColor = if
+        Hp * 3 < MaxHp -> ?RED;
+        Hp * 3 < MaxHp * 2 -> ?YELLOW;
+        true -> ?GREEN
+    end,
+    BonusStr = case {AtkBonus, DefBonus} of
+        {0, 0} -> "";
+        {A, 0} -> io_lib:format(" +~pATK", [A]);
+        {0, D} -> io_lib:format(" +~pDEF", [D]);
+        {A, D} -> io_lib:format(" +~pATK +~pDEF", [A, D])
+    end,
+    RoleIcon = case PartyRole of
+        leader -> io_lib:format("~s& ~s", [?CYAN, ?RESET]);
+        follower -> io_lib:format("~s+ ~s", [?DIM, ?RESET]);
+        solo -> io_lib:format("~s@ ~s", [?GREEN, ?RESET])
+    end,
+    io:format("~s~s~s~s~s (~s) Lv~p  ~sHP:~p/~p~s  XP:~p/~p  ~s~pg~s~s\e[K~n",
+              [Indent, RoleIcon, ?BOLD, Name, ?RESET, RaceStr, Level,
+               HpColor, Hp, MaxHp, ?RESET,
+               Exp, Needed, ?YELLOW, Gold, ?RESET, BonusStr]).
 
 print_enemies_summary(Enemies) ->
     Count = maps:size(Enemies),
