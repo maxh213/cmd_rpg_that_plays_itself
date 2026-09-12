@@ -13,5 +13,9 @@ test_dirs = ["test", "tests"]
 [comments]
 paths = ["src"]
 
+[sonar]
+project_key = "cmd-rpg"
+project_name = "CMD RPG"
+
 [qa]
 cmd = "make qa"
