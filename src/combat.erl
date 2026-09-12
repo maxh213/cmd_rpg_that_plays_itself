@@ -1,12 +1,35 @@
 -module(combat).
--export([resolve/2, resolve_group/2, exp_to_level/1, check_level_up/1,
-         roll_survive/2, generate_drop/1]).
+-export([resolve/2]).
+-export([resolve_group/2]).
+-export([exp_to_level/1]).
+-export([check_level_up/1]).
+-export([roll_survive/2]).
+-export([generate_drop/1]).
 
+-type fighter() :: #{level := pos_integer(),
+                        hp := integer(),
+                        attack_bonus => integer(),
+                        defense_bonus => integer(),
+                        atom() => term()}.
+-type hero() :: #{level := pos_integer(),
+                    exp := non_neg_integer(),
+                    max_hp := pos_integer(),
+                    hp := integer(),
+                    race => util:race(),
+                    atom() => term()}.
+-type effect() :: {hp_restore | attack | defense | evasion, integer()}.
+-type drop() :: nothing | {string(), effect()}.
+-type group_result() :: {party_won | party_lost, [fighter(), ...], fighter(),
+                            pos_integer(), non_neg_integer()}.
+
+-spec exp_to_level(non_neg_integer()) -> pos_integer().
 exp_to_level(Level) -> Level * 2 + 1.
 
+-spec roll_survive(pos_integer(), integer()) -> pos_integer().
 roll_survive(Level, Hp) ->
     rand:uniform(Level * 2 + Hp).
 
+-spec resolve(fighter(), fighter()) -> {fighter(), fighter(), pos_integer()}.
 resolve(A, B) ->
     AtkBonusA = maps:get(attack_bonus, A, 0),
     DefBonusA = maps:get(defense_bonus, A, 0),
@@ -25,34 +48,46 @@ resolve(A, B) ->
             {B, A#{hp := NewHpA}, Dmg}
     end.
 
+-spec resolve_group([fighter(), ...], fighter()) -> group_result().
 resolve_group(Party, Opponent) when is_list(Party), length(Party) > 0 ->
     TotalDef = lists:sum([maps:get(defense_bonus, M, 0) || M <- Party]),
     TotalAtk = lists:sum([maps:get(attack_bonus, M, 0) || M <- Party]),
     PartyRolls = [roll_survive(maps:get(level, M), maps:get(hp, M)) || M <- Party],
     BestRoll = lists:max(PartyRolls) + TotalDef,
-    OppAtk = maps:get(attack_bonus, Opponent, 0),
     OppDef = maps:get(defense_bonus, Opponent, 0),
     OppRoll = roll_survive(maps:get(level, Opponent), maps:get(hp, Opponent)) + OppDef,
     if
         BestRoll >= OppRoll ->
-            Dmg = max(1, lists:sum([maps:get(level, M) || M <- Party]) + TotalAtk +
-                        rand:uniform(3) - OppDef),
-            NewOppHp = maps:get(hp, Opponent) - Dmg,
-            {party_won, Party, Opponent#{hp := NewOppHp}, Dmg, 0};
+            party_strikes(Party, Opponent, TotalAtk, OppDef);
         true ->
-            Dmg = max(1, maps:get(level, Opponent) + OppAtk + rand:uniform(3) - TotalDef div length(Party)),
-            HitIdx = rand:uniform(length(Party)),
-            HitMember = lists:nth(HitIdx, Party),
-            NewHp = maps:get(hp, HitMember) - Dmg,
-            UpdatedMember = HitMember#{hp := NewHp},
-            UpdatedParty = list_replace(HitIdx, UpdatedMember, Party),
-            {party_lost, UpdatedParty, Opponent, Dmg, HitIdx}
+            opponent_strikes(Party, Opponent, TotalDef)
     end.
 
+-spec party_strikes([fighter(), ...], fighter(), integer(), integer()) -> group_result().
+party_strikes(Party, Opponent, TotalAtk, OppDef) ->
+    Levels = lists:sum([maps:get(level, M) || M <- Party]),
+    Dmg = max(1, Levels + TotalAtk + rand:uniform(3) - OppDef),
+    NewOppHp = maps:get(hp, Opponent) - Dmg,
+    {party_won, Party, Opponent#{hp := NewOppHp}, Dmg, 0}.
+
+-spec opponent_strikes([fighter(), ...], fighter(), integer()) -> group_result().
+opponent_strikes(Party, Opponent, TotalDef) ->
+    OppAtk = maps:get(attack_bonus, Opponent, 0),
+    Guard = TotalDef div length(Party),
+    Dmg = max(1, maps:get(level, Opponent) + OppAtk + rand:uniform(3) - Guard),
+    HitIdx = rand:uniform(length(Party)),
+    HitMember = lists:nth(HitIdx, Party),
+    NewHp = maps:get(hp, HitMember) - Dmg,
+    UpdatedMember = HitMember#{hp := NewHp},
+    UpdatedParty = list_replace(HitIdx, UpdatedMember, Party),
+    {party_lost, UpdatedParty, Opponent, Dmg, HitIdx}.
+
+-spec list_replace(pos_integer(), T, [T, ...]) -> [T, ...].
 list_replace(Idx, Val, List) ->
     {Before, [_Old | After]} = lists:split(Idx - 1, List),
     Before ++ [Val | After].
 
+-spec check_level_up(hero()) -> hero().
 check_level_up(Char) ->
     Level = maps:get(level, Char),
     Exp = maps:get(exp, Char),
@@ -63,16 +98,18 @@ check_level_up(Char) ->
             Race = maps:get(race, Char, human),
             MaxHp = new_max_hp(NewLevel, Race),
             Char#{level := NewLevel, exp := Exp - Needed,
-                  max_hp := MaxHp, hp := MaxHp};
+                    max_hp := MaxHp, hp := MaxHp};
         true ->
             Char
     end.
 
+-spec new_max_hp(pos_integer(), util:race()) -> pos_integer().
 new_max_hp(Level, Race) ->
     RaceBonuses = util:race_bonuses(Race),
     HpBonus = maps:get(hp_bonus, RaceBonuses, 0),
     Level * 8 + 12 + HpBonus.
 
+-spec generate_drop(pos_integer()) -> drop().
 generate_drop(EnemyLevel) ->
     Roll = rand:uniform(100),
     if
@@ -84,6 +121,7 @@ generate_drop(EnemyLevel) ->
             nothing
     end.
 
+-spec rare_drop(pos_integer()) -> drop().
 rare_drop(EnemyLevel) ->
     Items = [
         {"Enchanted Blade",  {attack, EnemyLevel + 2}},
@@ -94,6 +132,7 @@ rare_drop(EnemyLevel) ->
     ],
     lists:nth(rand:uniform(length(Items)), Items).
 
+-spec common_drop(pos_integer()) -> drop().
 common_drop(EnemyLevel) ->
     Items = [
         {"Iron Sword",     {attack, max(1, EnemyLevel)}},

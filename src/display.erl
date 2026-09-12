@@ -5,12 +5,17 @@
 -define(FALLBACK_COLS, 85).
 -define(FALLBACK_ROWS, 75).
 
+-type dimension() :: {ok, pos_integer()} | {error, atom()}.
+
+-spec start(pid()) -> pid().
 start(WorldPid) ->
     start(WorldPid, ?IDLE_TIMEOUT).
 
+-spec start(pid(), timeout()) -> pid().
 start(_WorldPid, Timeout) ->
     spawn(fun() -> loop(Timeout, screen:unpainted()) end).
 
+-spec loop(timeout(), screen:screen()) -> no_return().
 loop(Timeout, Screen) ->
     receive
         {render, Characters, Enemies, Shops, Inns, EventLog, MoveCount} ->
@@ -23,8 +28,8 @@ loop(Timeout, Screen) ->
         loop(Timeout, Screen)
     end.
 
+-spec terminal_size(dimension(), dimension()) -> screen:size().
 terminal_size({ok, Cols}, {ok, Rows}) ->
     {Cols, Rows};
 terminal_size(_Cols, _Rows) ->
     {?FALLBACK_COLS, ?FALLBACK_ROWS}.
-
