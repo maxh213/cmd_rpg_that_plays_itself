@@ -227,6 +227,8 @@ first_update_paints_the_whole_frame_test() ->
     ?assertHides(Rows, "Cedric"),
     ?assertShows(Rows, "+2ATK +3DEF"),
     ?assertShows(Rows, "+4DEF"),
+    [BromRow] = row_holding(Screen, "      + Brom"),
+    ?assert(lists:suffix("g +2ATK", row_text(Screen, BromRow))),
     ?assertShows(Rows, "Enemies on map: 1"),
     ?assertEqual([lists:flatten(io_lib:format("    > ev~2..0b", [N])) || N <- lists:seq(4, 15)],
                  [row_text(Screen, Row) || Row <- row_holding(Screen, "> ")]),
