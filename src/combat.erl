@@ -1,6 +1,6 @@
 -module(combat).
 -export([resolve/2, resolve_group/2, exp_to_level/1, check_level_up/1,
-         roll_survive/2, generate_drop/1, drop_name/1]).
+         roll_survive/2, generate_drop/1]).
 
 exp_to_level(Level) -> Level * 2 + 1.
 
@@ -103,6 +103,3 @@ common_drop(EnemyLevel) ->
         {"Steel Dagger",   {attack, max(1, EnemyLevel - 1)}}
     ],
     lists:nth(rand:uniform(length(Items)), Items).
-
-drop_name(nothing) -> none;
-drop_name({Name, _Bonus}) -> Name.

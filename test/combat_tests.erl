@@ -148,7 +148,3 @@ common_drop_values_test() ->
                      "Steel Dagger" => {attack, 2}},
         ?assertEqual(maps:get(Name, Expected), Effect)
     end, Common).
-
-drop_name_test() ->
-    ?assertEqual(none, combat:drop_name(nothing)),
-    ?assertEqual("Iron Sword", combat:drop_name({"Iron Sword", {attack, 2}})).

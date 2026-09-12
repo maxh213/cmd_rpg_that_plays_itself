@@ -8,17 +8,6 @@ clamp_test() ->
     ?assertEqual(0, util:clamp(0, 0, 39)),
     ?assertEqual(39, util:clamp(39, 0, 39)).
 
-random_name_test() ->
-    Names = [util:random_name(12) || _ <- lists:seq(1, 100)],
-    lists:foreach(fun(Name) ->
-        ?assertEqual(12, length(Name)),
-        ?assert(lists:all(fun is_name_char/1, Name))
-    end, Names).
-
-is_name_char(C) ->
-    (C >= $A andalso C =< $Z) orelse (C >= $a andalso C =< $z)
-        orelse (C >= $0 andalso C =< $9).
-
 random_pos_test() ->
     Positions = [util:random_pos(40) || _ <- lists:seq(1, 200)],
     lists:foreach(fun({X, Y}) ->

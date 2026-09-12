@@ -1,10 +1,6 @@
 -module(util).
--export([random_name/1, clamp/3, random_pos/1, random_direction/0, shuffle/1,
+-export([clamp/3, random_pos/1, random_direction/0, shuffle/1,
          random_race/0, race_name/1, race_bonuses/1, race_label/1, race_speed/1]).
-
-random_name(Length) ->
-    Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
-    [lists:nth(rand:uniform(length(Chars)), Chars) || _ <- lists:seq(1, Length)].
 
 clamp(Val, Min, Max) ->
     max(Min, min(Max, Val)).

@@ -12,6 +12,7 @@
 -define(PARTY_FORM_TICKS, 3).
 -define(DISPLAY_INTERVAL, 500).
 -define(RESPAWN_DELAY, 2500).
+-define(LOG_LIMIT, 50).
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
@@ -116,7 +117,7 @@ apply_character_move(Pid, Info, Direction, State) ->
     {NewChars3, NewEnemies, CombatLog} = check_enemy_collisions(Pid, NewX, NewY, NewChars2, Enemies),
     {NewChars4, PartyLog} = maybe_check_parties(MC, NewChars3, Inns),
     AllLog = InnLog ++ ShopLog ++ CombatLog ++ PartyLog,
-    NewLog = trim_log(Log ++ AllLog, 50),
+    NewLog = append_log(Log, AllLog),
     {noreply, State#{characters := NewChars4, enemies := NewEnemies,
                      event_log := NewLog, move_count := MC + 1}}.
 
@@ -131,30 +132,18 @@ handle_info(render, State) ->
     {noreply, State#{characters := NewChars2, event_log := []}};
 handle_info({respawn_char, Name, Race}, State) ->
     #{characters := Chars} = State,
-    Bonuses = util:race_bonuses(Race),
-    BonusHp = maps:get(hp_bonus, Bonuses, 0),
-    {X, Y} = util:random_pos(?MAP_SIZE),
-    Info = #{name => Name, race => Race, level => 1,
-             hp => 20 + BonusHp, max_hp => 20 + BonusHp,
-             exp => 0, x => X, y => Y, inventory => [],
-             attack_bonus => maps:get(attack_bonus, Bonuses, 0),
-             defense_bonus => maps:get(defense_bonus, Bonuses, 0),
-             gold => 0, party_role => solo, party_members => [],
-             follower_pids => [], at_inn => false, inn_ticks => 0},
+    Info = new_character(Name, Race),
     Pid = start_character(Race),
-    NewLog = maps:get(event_log, State) ++ [io_lib:format("~s respawned!", [Name])],
-    {noreply, State#{characters := Chars#{Pid => Info},
-                     event_log := trim_log(NewLog, 50)}};
+    NewLog = append_log(maps:get(event_log, State),
+                        [io_lib:format("~s respawned!", [Name])]),
+    {noreply, State#{characters := Chars#{Pid => Info}, event_log := NewLog}};
 handle_info({respawn_enemy, Name, Level}, State) ->
     #{enemies := Enemies} = State,
-    {X, Y} = util:random_pos(?MAP_SIZE),
-    MaxHp = Level * 4 + 5,
-    Info = #{name => Name, level => Level, hp => MaxHp, max_hp => MaxHp,
-             x => X, y => Y, type => enemy},
+    Info = new_enemy(Name, Level),
     Pid = start_enemy(Level),
-    NewLog = maps:get(event_log, State) ++ [io_lib:format("A ~s appeared!", [Name])],
-    {noreply, State#{enemies := Enemies#{Pid => Info},
-                     event_log := trim_log(NewLog, 50)}};
+    NewLog = append_log(maps:get(event_log, State),
+                        [io_lib:format("A ~s appeared!", [Name])]),
+    {noreply, State#{enemies := Enemies#{Pid => Info}, event_log := NewLog}};
 handle_info(_Msg, State) ->
     {noreply, State}.
 
@@ -164,10 +153,11 @@ apply_direction(east, X, Y)  -> {util:clamp(X + 1, 0, ?MAP_SIZE - 1), Y};
 apply_direction(west, X, Y)  -> {util:clamp(X - 1, 0, ?MAP_SIZE - 1), Y};
 apply_direction(stay, X, Y)  -> {X, Y}.
 
-trim_log(Log, Max) ->
-    case length(Log) > Max of
-        true -> lists:nthtail(length(Log) - Max, Log);
-        false -> Log
+append_log(Log, Entries) ->
+    NewLog = Log ++ Entries,
+    case length(NewLog) > ?LOG_LIMIT of
+        true -> lists:nthtail(length(NewLog) - ?LOG_LIMIT, NewLog);
+        false -> NewLog
     end.
 
 start_character(Race) ->
@@ -176,31 +166,36 @@ start_character(Race) ->
 start_enemy(Level) ->
     enemy:start(Level, fun get_enemy_state/1, fun move/2).
 
+new_character(Name, Race) ->
+    Bonuses = util:race_bonuses(Race),
+    BonusHp = maps:get(hp_bonus, Bonuses, 0),
+    {X, Y} = util:random_pos(?MAP_SIZE),
+    #{name => Name, race => Race, level => 1,
+      hp => 20 + BonusHp, max_hp => 20 + BonusHp,
+      exp => 0, x => X, y => Y, inventory => [],
+      attack_bonus => maps:get(attack_bonus, Bonuses, 0),
+      defense_bonus => maps:get(defense_bonus, Bonuses, 0),
+      gold => 0, party_role => solo, party_members => [],
+      follower_pids => [], at_inn => false, inn_ticks => 0}.
+
 spawn_characters(Count) ->
     lists:foldl(fun(_, Acc) ->
         Race = util:random_race(),
-        Name = util:race_name(Race),
-        Bonuses = util:race_bonuses(Race),
-        BonusHp = maps:get(hp_bonus, Bonuses, 0),
-        {X, Y} = util:random_pos(?MAP_SIZE),
-        Info = #{name => Name, race => Race, level => 1,
-                 hp => 20 + BonusHp, max_hp => 20 + BonusHp,
-                 exp => 0, x => X, y => Y, inventory => [],
-                 attack_bonus => maps:get(attack_bonus, Bonuses, 0),
-                 defense_bonus => maps:get(defense_bonus, Bonuses, 0),
-                 gold => 0, party_role => solo, party_members => [],
-                 follower_pids => [], at_inn => false, inn_ticks => 0},
+        Info = new_character(util:race_name(Race), Race),
         Pid = start_character(Race),
         Acc#{Pid => Info}
     end, #{}, lists:seq(1, Count)).
 
+new_enemy(Name, Level) ->
+    {X, Y} = util:random_pos(?MAP_SIZE),
+    MaxHp = Level * 4 + 5,
+    #{name => Name, level => Level, hp => MaxHp, max_hp => MaxHp,
+      x => X, y => Y, type => enemy}.
+
 spawn_enemies(Count) ->
     lists:foldl(fun(_, Acc) ->
         {Name, Level} = random_enemy(),
-        {X, Y} = util:random_pos(?MAP_SIZE),
-        MaxHp = Level * 4 + 5,
-        Info = #{name => Name, level => Level, hp => MaxHp, max_hp => MaxHp,
-                 x => X, y => Y, type => enemy},
+        Info = new_enemy(Name, Level),
         Pid = start_enemy(Level),
         Acc#{Pid => Info}
     end, #{}, lists:seq(1, Count)).
@@ -438,8 +433,7 @@ engage_enemy(CharPid, CharInfo, EPid, EInfo, AccChars, AccEnemies, AccLog) ->
     case maps:get(party_role, CharInfo, solo) =:= leader of
         true ->
             FollowerPids = maps:get(follower_pids, CharInfo, []),
-            LiveMembers = [FInfo || FPid <- FollowerPids,
-                           {ok, FInfo} <- [maps:find(FPid, AccChars)]],
+            LiveMembers = live_members(FollowerPids, AccChars),
             resolve_group_enemy(CharPid, [CharInfo | LiveMembers], EPid, EInfo,
                                 AccChars, AccEnemies, AccLog);
         false ->
@@ -532,12 +526,12 @@ group_outcome(party_lost, CharPid, FullParty, UpdatedParty, _UpdatedEnemy, Dmg,
                        HitMember, Dmg, EInfo, AccChars, AccEnemies, AccLog).
 
 party_slays_enemy(CharPid, UpdatedParty, EPid, EInfo, AccChars, AccEnemies, AccLog) ->
-    LeaderName = maps:get(name, hd(UpdatedParty)),
+    Leader0 = hd(UpdatedParty),
+    LeaderName = maps:get(name, Leader0),
     EName = maps:get(name, EInfo),
     ELevel = maps:get(level, EInfo),
     XpGain = ELevel + 1,
     GoldGain = ELevel * 2 + rand:uniform(3),
-    Leader0 = hd(UpdatedParty),
     Leader1 = Leader0#{exp := maps:get(exp, Leader0) + XpGain,
                        gold := maps:get(gold, Leader0, 0) + GoldGain},
     Leader2 = combat:check_level_up(Leader1),

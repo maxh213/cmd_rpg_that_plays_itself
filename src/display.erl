@@ -96,20 +96,18 @@ build_grid(Characters, Enemies, Shops, Inns) ->
         end
     end, {[], []}, Characters),
     G3 = lists:foldl(fun(Info, Acc) ->
-        X = maps:get(x, Info),
-        Y = maps:get(y, Info),
-        Name = maps:get(name, Info),
-        Level = maps:get(level, Info),
-        Acc#{{X, Y} => {char, Name, Level, follower}}
+        place_char(Info, follower, Acc)
     end, G2, Followers),
     lists:foldl(fun(Info, Acc) ->
-        X = maps:get(x, Info),
-        Y = maps:get(y, Info),
-        Name = maps:get(name, Info),
-        Level = maps:get(level, Info),
-        Role = maps:get(party_role, Info, solo),
-        Acc#{{X, Y} => {char, Name, Level, Role}}
+        place_char(Info, maps:get(party_role, Info, solo), Acc)
     end, G3, Others).
+
+place_char(Info, Role, Grid) ->
+    X = maps:get(x, Info),
+    Y = maps:get(y, Info),
+    Name = maps:get(name, Info),
+    Level = maps:get(level, Info),
+    Grid#{{X, Y} => {char, Name, Level, Role}}.
 
 char_color(Level) when Level >= 5 -> ?MAGENTA;
 char_color(Level) when Level >= 3 -> ?YELLOW;
