@@ -385,6 +385,74 @@ hp_colour_changes_exactly_at_a_third_and_two_thirds_test() ->
     ?assertEqual("\e[32m", hp_style(Screen, "Twothirds (")),
     ?assertEqual("\e[31m", hp_style(Screen, "Under (")).
 
+every_part_keeps_its_colour_through_a_differential_repaint_test() ->
+    {Busy, Quiet} = styled_worlds(),
+    QuietScreen = screen_of(run_frames([Busy, Quiet])),
+    ?assertEqual(styled_table() ++ [{56, [{"", "    "}, {"\e[2m", "> (quiet...)"}]}],
+                 table_of(QuietScreen)),
+    lists:foreach(fun(Row) ->
+        ?assertEqual({"\e[2m", $|}, cell_at(QuietScreen, Row, 3)),
+        ?assertEqual({"\e[2m", $|}, cell_at(QuietScreen, Row, 84))
+    end, lists:seq(?GRID_TOP_ROW, ?GRID_TOP_ROW + 39)),
+    BusyScreen = screen_of(run_frames([Quiet, Busy])),
+    ?assertEqual([{"", "    "}, {"\e[2m", "> "}, {"", "one"}], style_runs(BusyScreen, 56)).
+
+styled_worlds() ->
+    LeaderPid = test_support:fake_pid(),
+    FollowerPid = test_support:fake_pid(),
+    Heroes = #{
+        LeaderPid => solo_hero("Aldric", #{level => 5, hp => 40, max_hp => 40, gold => 12,
+                                           x => 1, y => 1, party_role => leader,
+                                           follower_pids => [FollowerPid]}),
+        FollowerPid => solo_hero("Brom", #{race => dwarf, level => 3, hp => 9, max_hp => 20,
+                                           gold => 3, x => 11, y => 1,
+                                           party_role => follower}),
+        test_support:fake_pid() => solo_hero("Elara", #{hp => 19, max_hp => 20, gold => 7,
+                                                        x => 3, y => 1})},
+    Quiet = world(#{characters => Heroes,
+                    enemies => #{test_support:fake_pid() =>
+                                     test_support:enemy_info(#{x => 5, y => 1})},
+                    shops => [#{name => "Shop", x => 7, y => 1}],
+                    inns => [#{name => "Inn", x => 9, y => 1}], moves => 2}),
+    Busy = maps:merge(Quiet, #{enemies => goblins(3, 30), log => ["one"], moves => 1}),
+    {Busy, Quiet}.
+
+styled_table() ->
+    Dim = "\e[2m",
+    Dot = {Dim, ". "},
+    [{1, [{"\e[1m\e[36m", "=== CMD RPG [2 moves] ==="}]},
+     {3, [{"", "  "}, {Dim, "+" ++ lists:duplicate(81, $-) ++ "+"}]},
+     {5, [{"", "  "}, {Dim, "|. "}, {"\e[1m\e[35m", "& "}, Dot, {"\e[1m\e[32m", "@ "}, Dot,
+          {"\e[1m\e[31m", "! "}, Dot, {"\e[1m\e[33m", "$ "}, Dot, {"\e[1m\e[34m", "H "}, Dot,
+          {"\e[2m\e[36m", "+ "}, {Dim, lists:append(lists:duplicate(28, ". ")) ++ "|"}]},
+     {44, [{"", "  "}, {Dim, "+" ++ lists:duplicate(81, $-) ++ "+"}]},
+     {45, [{"", "  "}, {"\e[1m\e[32m", "@ "}, {"", "Hero  "}, {"\e[1m\e[32m", "& "},
+           {"", "Party  "}, {"\e[1m\e[31m", "! "}, {"", "Enemy  "}, {"\e[1m\e[33m", "$ "},
+           {"", "Shop  "}, {"\e[1m\e[34m", "H "}, {"", "Inn"}]},
+     {47, [{"", "  "}, {"\e[1m\e[36m", "Heroes:"}]},
+     {48, [{"", "  "}, {"\e[1m\e[36m", "--- Party: Aldric + Brom ---"}]},
+     {49, [{"", "    "}, {"\e[36m", "& "}, {"\e[1m", "Aldric"}, {"", " (Hum) Lv5  "},
+           {"\e[32m", "HP:40/40"}, {"", "  XP:0/11  "}, {"\e[33m", "12g"}]},
+     {50, [{"", "      "}, {Dim, "+ "}, {"\e[1m", "Brom"}, {"", " (Dwf) Lv3  "},
+           {"\e[33m", "HP:9/20"}, {"", "  XP:0/7  "}, {"\e[33m", "3g"}]},
+     {52, [{"", "    "}, {"\e[32m", "@ "}, {"\e[1m", "Elara"}, {"", " (Hum) Lv1  "},
+           {"\e[32m", "HP:19/20"}, {"", "  XP:0/3  "}, {"\e[33m", "7g"}]},
+     {53, [{"", "  "}, {"\e[2m\e[31m", "Enemies on map: 1"}]},
+     {55, [{"", "  "}, {"\e[1m\e[33m", "Log:"}]}].
+
+table_of(Screen) ->
+    [{Row, style_runs(Screen, Row)}
+     || Row <- painted_rows(Screen), Row < ?GRID_TOP_ROW orelse Row > 43 orelse Row =:= 5].
+
+style_runs(Screen, Row) ->
+    Cells = [cell_at(Screen, Row, Col) || Col <- lists:seq(1, row_width(Screen, Row))],
+    lists:reverse(lists:foldl(fun merge_run/2, [], Cells)).
+
+merge_run({Style, Char}, [{Style, Text} | Runs]) ->
+    [{Style, Text ++ [Char]} | Runs];
+merge_run({Style, Char}, Runs) ->
+    [{Style, [Char]} | Runs].
+
 hp_style(Screen, Name) ->
     [Row] = row_holding(Screen, Name),
     style_at(Screen, Row, hp_column(Screen, Row)).
