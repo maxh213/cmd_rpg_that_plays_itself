@@ -3,139 +3,60 @@
 
 -define(MAP_SIZE, 40).
 -define(IDLE_TIMEOUT, 10000).
--define(FRAME_ROWS, 74).
--define(PARK_ROW, 75).
--define(FRAME_COLS, 85).
-
--define(RESET,   "\e[0m").
--define(BOLD,    "\e[1m").
--define(RED,     "\e[31m").
--define(GREEN,   "\e[32m").
--define(YELLOW,  "\e[33m").
--define(BLUE,    "\e[34m").
--define(MAGENTA, "\e[35m").
--define(CYAN,    "\e[36m").
--define(DIM,     "\e[2m").
-
--define(HIDE, "\e[?25l").
--define(SHOW, "\e[?25h").
--define(ERASE_RIGHT, "\e[K").
 
 start(WorldPid) ->
     start(WorldPid, ?IDLE_TIMEOUT).
 
 start(_WorldPid, Timeout) ->
-    spawn(fun() -> loop(Timeout, dirty_screen()) end).
+    spawn(fun() -> loop(Timeout, screen:unpainted()) end).
 
-loop(Timeout, Painted) ->
+loop(Timeout, Screen) ->
     receive
         {render, Characters, Enemies, Shops, Inns, EventLog, MoveCount} ->
             Lines = frame_lines(Characters, Enemies, Shops, Inns, EventLog, MoveCount),
-            io:format("~s", [update(Painted, Lines)]),
-            loop(Timeout, Lines)
+            {Bytes, Painted} = screen:update(Screen, Lines),
+            io:format("~s", [Bytes]),
+            loop(Timeout, Painted)
     after Timeout ->
-        loop(Timeout, Painted)
+        loop(Timeout, Screen)
     end.
 
-dirty_screen() ->
-    lists:duplicate(?FRAME_ROWS, lists:duplicate(?FRAME_COLS, dirty)).
-
-update(Painted, Lines) ->
-    [?HIDE, row_updates(Painted, Lines), addr(?PARK_ROW, 1), ?SHOW].
-
-row_updates(Painted, Lines) ->
-    Height = max(length(Painted), length(Lines)),
-    Rows = lists:zip3(lists:seq(1, Height), pad(Painted, Height, []), pad(Lines, Height, [])),
-    [row_update(Row, Was, Now) || {Row, Was, Now} <- Rows].
-
-pad(Items, Length, Filler) ->
-    Items ++ lists:duplicate(Length - length(Items), Filler).
-
-row_update(_Row, Same, Same) ->
-    [];
-row_update(Row, Was, Now) ->
-    Width = length(Now),
-    Columns = lists:zip3(lists:seq(1, Width), on_screen(Was, Width), Now),
-    [[paint_run(Row, Col, Cells) || {Col, Cells} <- changed_runs(Columns)],
-     clear_tail(Row, length(Was), Width)].
-
-on_screen(Was, Width) ->
-    pad(lists:sublist(Was, Width), Width, blank).
-
-changed_runs([]) ->
-    [];
-changed_runs([{_Col, Same, Same} | Rest]) ->
-    changed_runs(Rest);
-changed_runs([{Col, _Was, Now} | Rest]) ->
-    {Cells, Tail} = run_from(Rest, [Now]),
-    [{Col, Cells} | changed_runs(Tail)].
-
-run_from([{_Col, Same, Same} | _] = Tail, Acc) ->
-    {lists:reverse(Acc), Tail};
-run_from([], Acc) ->
-    {lists:reverse(Acc), []};
-run_from([{_Col, _Was, Now} | Rest], Acc) ->
-    run_from(Rest, [Now | Acc]).
-
-paint_run(Row, Col, Cells) ->
-    [addr(Row, Col), cell_bytes(Cells, none), ?RESET].
-
-cell_bytes([], _Style) ->
-    [];
-cell_bytes([{Style, Char} | Rest], Style) ->
-    [Char | cell_bytes(Rest, Style)];
-cell_bytes([{Style, Char} | Rest], _Other) ->
-    [?RESET, Style, Char | cell_bytes(Rest, Style)].
-
-clear_tail(Row, WasWidth, NowWidth) when WasWidth > NowWidth ->
-    [addr(Row, NowWidth + 1), ?ERASE_RIGHT];
-clear_tail(_Row, _WasWidth, _NowWidth) ->
-    [].
-
-addr(Row, Col) ->
-    io_lib:format("\e[~p;~pH", [Row, Col]).
-
 frame_lines(Characters, Enemies, Shops, Inns, EventLog, MoveCount) ->
-    Lines = header_lines(MoveCount)
+    header_lines(MoveCount)
         ++ map_lines(Characters, Enemies, Shops, Inns)
         ++ [legend_line()]
         ++ roster_lines(Characters)
         ++ [enemies_line(Enemies)]
-        ++ event_lines(EventLog),
-    lists:sublist(Lines, ?FRAME_ROWS).
-
-styled_line(Parts) ->
-    Cells = [[{Style, Char} || Char <- lists:flatten(Text)] || {Style, Text} <- Parts],
-    lists:sublist(lists:append(Cells), ?FRAME_COLS).
+        ++ event_lines(EventLog).
 
 header_lines(MoveCount) ->
-    [styled_line([{?BOLD ++ ?CYAN, io_lib:format("=== CMD RPG [~p moves] ===", [MoveCount])}]), []].
+    [[{[bold, cyan], io_lib:format("=== CMD RPG [~p moves] ===", [MoveCount])}], []].
 
 map_lines(Characters, Enemies, Shops, Inns) ->
     Grid = build_grid(Characters, Enemies, Shops, Inns),
     [border_line()] ++ [row_line(Y, Grid) || Y <- lists:seq(0, ?MAP_SIZE - 1)] ++ [border_line()].
 
 border_line() ->
-    styled_line([{"", "  "}, {?DIM, "+" ++ lists:duplicate(?MAP_SIZE * 2 + 1, $-) ++ "+"}]).
+    [{[], "  "}, {[dim], "+" ++ lists:duplicate(?MAP_SIZE * 2 + 1, $-) ++ "+"}].
 
 row_line(Y, Grid) ->
     Cells = [cell_part(maps:get({X, Y}, Grid, empty)) || X <- lists:seq(0, ?MAP_SIZE - 1)],
-    styled_line([{"", "  "}, {?DIM, "|"}] ++ Cells ++ [{?DIM, "|"}]).
+    [{[], "  "}, {[dim], "|"}] ++ Cells ++ [{[dim], "|"}].
 
 cell_part(empty) ->
-    {?DIM, ". "};
+    {[dim], ". "};
 cell_part({shop, _Name}) ->
-    {?BOLD ++ ?YELLOW, "$ "};
+    {[bold, yellow], "$ "};
 cell_part({inn, _Name}) ->
-    {?BOLD ++ ?BLUE, "H "};
+    {[bold, blue], "H "};
 cell_part({char, _Name, Level, solo}) ->
-    {?BOLD ++ char_color(Level), "@ "};
+    {[bold, char_color(Level)], "@ "};
 cell_part({char, _Name, Level, leader}) ->
-    {?BOLD ++ char_color(Level), "& "};
+    {[bold, char_color(Level)], "& "};
 cell_part({char, _Name, _Level, follower}) ->
-    {?DIM ++ ?CYAN, "+ "};
+    {[dim, cyan], "+ "};
 cell_part({enemy, _Name, _Level}) ->
-    {?BOLD ++ ?RED, "! "}.
+    {[bold, red], "! "}.
 
 build_grid(Characters, Enemies, Shops, Inns) ->
     G0 = lists:foldl(fun(#{name := IName, x := IX, y := IY}, Acc) ->
@@ -171,22 +92,22 @@ place_char(Info, Role, Grid) ->
     Level = maps:get(level, Info),
     Grid#{{X, Y} => {char, Name, Level, Role}}.
 
-char_color(Level) when Level >= 5 -> ?MAGENTA;
-char_color(Level) when Level >= 3 -> ?YELLOW;
-char_color(_Level) -> ?GREEN.
+char_color(Level) when Level >= 5 -> magenta;
+char_color(Level) when Level >= 3 -> yellow;
+char_color(_Level) -> green.
 
 legend_line() ->
-    styled_line([{"", "  "},
-                 {?BOLD ++ ?GREEN, "@ "}, {"", "Hero  "},
-                 {?BOLD ++ ?GREEN, "& "}, {"", "Party  "},
-                 {?BOLD ++ ?RED, "! "}, {"", "Enemy  "},
-                 {?BOLD ++ ?YELLOW, "$ "}, {"", "Shop  "},
-                 {?BOLD ++ ?BLUE, "H "}, {"", "Inn"}]).
+    [{[], "  "},
+     {[bold, green], "@ "}, {[], "Hero  "},
+     {[bold, green], "& "}, {[], "Party  "},
+     {[bold, red], "! "}, {[], "Enemy  "},
+     {[bold, yellow], "$ "}, {[], "Shop  "},
+     {[bold, blue], "H "}, {[], "Inn"}].
 
 roster_lines(Characters) ->
     {Leaders, Solos, Followers} = split_roles(Characters),
     Parties = [party_lines(Leader, Followers, Characters) || Leader <- Leaders],
-    [[], styled_line([{"", "  "}, {?BOLD ++ ?CYAN, "Heroes:"}])]
+    [[], [{[], "  "}, {[bold, cyan], "Heroes:"}]]
         ++ lists:append(Parties)
         ++ solo_lines(Solos).
 
@@ -204,7 +125,7 @@ party_lines({_LeaderPid, LeaderInfo}, Followers, Characters) ->
     FollowerPids = maps:get(follower_pids, LeaderInfo, []),
     FollowerNames = follower_names(Followers, FollowerPids, Characters),
     Members = string:join([LName | FollowerNames], " + "),
-    [styled_line([{"", "  "}, {?BOLD ++ ?CYAN, "--- Party: " ++ Members ++ " ---"}]),
+    [[{[], "  "}, {[bold, cyan], "--- Party: " ++ Members ++ " ---"}],
      hero_line("    ", LeaderInfo)]
         ++ follower_lines(Followers, FollowerNames)
         ++ [[]].
@@ -238,40 +159,38 @@ hero_line(Indent, Info) ->
     Hp = maps:get(hp, Info),
     MaxHp = maps:get(max_hp, Info),
     RaceStr = util:race_label(maps:get(race, Info, human)),
-    styled_line([{"", Indent},
-                 role_icon(maps:get(party_role, Info, solo)),
-                 {?BOLD, maps:get(name, Info)},
-                 {"", io_lib:format(" (~s) Lv~p  ", [RaceStr, Level])},
-                 {hp_color(Hp, MaxHp), io_lib:format("HP:~p/~p", [Hp, MaxHp])},
-                 {"", io_lib:format("  XP:~p/~p  ",
-                                    [maps:get(exp, Info), combat:exp_to_level(Level)])},
-                 {?YELLOW, io_lib:format("~pg", [maps:get(gold, Info, 0)])},
-                 {"", bonus_str(maps:get(attack_bonus, Info), maps:get(defense_bonus, Info))}]).
+    [{[], Indent},
+     role_icon(maps:get(party_role, Info, solo)),
+     {[bold], maps:get(name, Info)},
+     {[], io_lib:format(" (~s) Lv~p  ", [RaceStr, Level])},
+     {[hp_color(Hp, MaxHp)], io_lib:format("HP:~p/~p", [Hp, MaxHp])},
+     {[], io_lib:format("  XP:~p/~p  ", [maps:get(exp, Info), combat:exp_to_level(Level)])},
+     {[yellow], io_lib:format("~pg", [maps:get(gold, Info, 0)])},
+     {[], bonus_str(maps:get(attack_bonus, Info), maps:get(defense_bonus, Info))}].
 
-hp_color(Hp, MaxHp) when Hp * 3 < MaxHp -> ?RED;
-hp_color(Hp, MaxHp) when Hp * 3 < MaxHp * 2 -> ?YELLOW;
-hp_color(_Hp, _MaxHp) -> ?GREEN.
+hp_color(Hp, MaxHp) when Hp * 3 < MaxHp -> red;
+hp_color(Hp, MaxHp) when Hp * 3 < MaxHp * 2 -> yellow;
+hp_color(_Hp, _MaxHp) -> green.
 
 bonus_str(0, 0) -> "";
 bonus_str(A, 0) -> io_lib:format(" +~pATK", [A]);
 bonus_str(0, D) -> io_lib:format(" +~pDEF", [D]);
 bonus_str(A, D) -> io_lib:format(" +~pATK +~pDEF", [A, D]).
 
-role_icon(leader) -> {?CYAN, "& "};
-role_icon(follower) -> {?DIM, "+ "};
-role_icon(solo) -> {?GREEN, "@ "}.
+role_icon(leader) -> {[cyan], "& "};
+role_icon(follower) -> {[dim], "+ "};
+role_icon(solo) -> {[green], "@ "}.
 
 enemies_line(Enemies) ->
-    styled_line([{"", "  "},
-                 {?DIM ++ ?RED, io_lib:format("Enemies on map: ~p", [maps:size(Enemies)])}]).
+    [{[], "  "}, {[dim, red], io_lib:format("Enemies on map: ~p", [maps:size(Enemies)])}].
 
 event_lines(EventLog) ->
-    [[], styled_line([{"", "  "}, {?BOLD ++ ?YELLOW, "Log:"}])] ++ log_lines(EventLog).
+    [[], [{[], "  "}, {[bold, yellow], "Log:"}]] ++ log_lines(EventLog).
 
 log_lines([]) ->
-    [styled_line([{"", "    "}, {?DIM, "> (quiet...)"}])];
+    [[{[], "    "}, {[dim], "> (quiet...)"}]];
 log_lines(EventLog) ->
-    [styled_line([{"", "    "}, {?DIM, "> "}, {"", Evt}]) || Evt <- recent(EventLog)].
+    [[{[], "    "}, {[dim], "> "}, {[], Evt}] || Evt <- recent(EventLog)].
 
 recent(EventLog) when length(EventLog) > 12 ->
     lists:nthtail(length(EventLog) - 12, EventLog);
