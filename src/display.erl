@@ -8,7 +8,9 @@
 -define(MIN_COLS, 20).
 -define(MIN_ROWS, 10).
 -define(RESERVED_ROWS, 18).
+-define(GRID_FRAME_COLS, 5).
 -define(LOG_SIZE, 12).
+-define(EMPTY_MARK, {{0, 0}, {[dim], ". "}}).
 
 start(WorldPid) ->
     start(WorldPid, ?IDLE_TIMEOUT).
@@ -44,8 +46,8 @@ frame_lines({Characters, Enemies, Shops, Inns, EventLog, MoveCount}, {Cols, Rows
     Top ++ log_lines(EventLog, Rows - 1 - length(Top)).
 
 scale(Cols, Rows) ->
-    Fit = max(1, lists:min([?MAP_SIZE, Rows - ?RESERVED_ROWS, (Cols - 5) div 2])),
-    ceil(?MAP_SIZE / Fit).
+    Side = max(1, lists:min([?MAP_SIZE, Rows - ?RESERVED_ROWS, (Cols - ?GRID_FRAME_COLS) div 2])),
+    ceil(?MAP_SIZE / Side).
 
 header_line(MoveCount) ->
     [{[bold, cyan], io_lib:format("=== CMD RPG [~p moves] ===", [MoveCount])}].
@@ -60,9 +62,11 @@ border_line(Side) ->
     [{[], "  "}, {[dim], "+" ++ lists:duplicate(Side * 2 + 1, $-) ++ "+"}].
 
 row_line(Row, Side, Grid) ->
-    Cells = [element(2, maps:get({Col, Row}, Grid, {{0, 0}, {[dim], ". "}}))
-             || Col <- lists:seq(0, Side - 1)],
+    Cells = [glyph(maps:get({Col, Row}, Grid, ?EMPTY_MARK)) || Col <- lists:seq(0, Side - 1)],
     [{[], "  "}, {[dim], "|"}] ++ Cells ++ [{[dim], "|"}].
+
+glyph({_Rank, Glyph}) ->
+    Glyph.
 
 strongest(Scale, {#{x := X, y := Y}, Mark}, Grid) ->
     maps:update_with({X div Scale, Y div Scale}, fun(Held) -> max(Held, Mark) end, Mark, Grid).

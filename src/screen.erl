@@ -10,12 +10,14 @@
 unpainted() ->
     {unsized, []}.
 
-update({Size, Painted}, Lines, Size) ->
+update(Screen, Lines, Size) ->
     Now = visible(Lines, Size),
-    {[?HIDE, row_updates(Painted, Now), park(Size), ?SHOW], {Size, Now}};
-update(_Screen, Lines, Size) ->
-    Now = visible(Lines, Size),
-    {[?HIDE, ?CLEAR, row_updates([], Now), park(Size), ?SHOW], {Size, Now}}.
+    {[?HIDE, repaint(Screen, Now, Size), park(Size), ?SHOW], {Size, Now}}.
+
+repaint({Size, Painted}, Now, Size) ->
+    row_updates(Painted, Now);
+repaint(_Screen, Now, _Size) ->
+    [?CLEAR, row_updates([], Now)].
 
 visible(Lines, {Cols, Rows}) ->
     [cells(Line, Cols) || Line <- lists:sublist(Lines, Rows - 1)].

@@ -969,14 +969,15 @@ class PtyGame:
             if not park:
                 raise Failure(f"[pty] an update did not end with a park: {update[-40:]!r}")
             body = update[:park.start()].decode("utf-8", "replace")
-            if body.startswith(CLEAR):
+            full_repaint = body.startswith(CLEAR)
+            if full_repaint:
                 screen.size = (cols, rows)
             if int(park.group(1)) != screen.size[1]:
                 raise Failure(f"[pty] an update parked on row {park.group(1)}, not {screen.size[1]}")
-            if len(CLEAR_SCREEN.findall(update)) != int(body.startswith(CLEAR)):
+            if len(CLEAR_SCREEN.findall(update)) != int(full_repaint):
                 raise Failure("[pty] an update cleared the screen other than at its start")
             screen.apply(body)
-            if body.startswith(CLEAR):
+            if full_repaint:
                 return screen.picture()
             if time.time() > deadline:
                 raise Failure(f"[pty] no full repaint at {cols}x{rows} within {timeout}s")
