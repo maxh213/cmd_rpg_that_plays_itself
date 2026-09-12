@@ -13,9 +13,37 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 FRAME_START = b"\x1b[?25l"
 FRAME_END = b"\x1b[75;1H\x1b[?25h"
+CURSOR_SHOW = b"\x1b[?25h"
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 CSI = re.compile(r"\x1b\[([0-9;?]*)([A-Za-z])")
-SCREEN_ROWS = 75
+HOME = re.compile(rb"\x1b\[(?:1;1)?H")
+ERASE_BELOW = re.compile(rb"\x1b\[0?J")
+CLEAR_SCREEN = re.compile(rb"\x1b\[[23]J")
+FRAME_ROWS = 74
+FRAME_COLS = 85
+PARK_ROW = 75
+SCREEN_ROWS = PARK_ROW
+FIRST_UPDATE_LIMIT = 10000
+UPDATE_LIMIT = 6000
+
+PLAIN = frozenset()
+BOLD = frozenset({"1"})
+DIM = frozenset({"2"})
+YELLOW = frozenset({"33"})
+DIM_RED = frozenset({"2", "31"})
+BOLD_CYAN = frozenset({"1", "36"})
+BOLD_YELLOW = frozenset({"1", "33"})
+MAP_STYLES = {
+    ".": {frozenset({"2"})},
+    "!": {frozenset({"1", "31"})},
+    "$": {frozenset({"1", "33"})},
+    "H": {frozenset({"1", "34"})},
+    "+": {frozenset({"2", "36"})},
+}
+ROSTER_ICON_STYLES = {"&": frozenset({"36"}), "+": frozenset({"2"}), "@": frozenset({"32"})}
+LEGEND_STYLES = [("@", "Hero", frozenset({"1", "32"})), ("&", "Party", frozenset({"1", "32"})),
+                 ("!", "Enemy", frozenset({"1", "31"})), ("$", "Shop", frozenset({"1", "33"})),
+                 ("H", "Inn", frozenset({"1", "34"}))]
 
 NAME = r"[\w ]+"
 HEADER_RE = re.compile(r"=== CMD RPG \[(\d+) moves\] ===")
@@ -82,6 +110,7 @@ class Hero:
         self.gold = int(match.group(10))
         self.atk = int(match.group(11) or 0)
         self.defense = int(match.group(12) or 0)
+        self.width = len(match.group(0))
         self.party = party
 
 
@@ -197,10 +226,40 @@ class Frame:
         return {pos for pos, glyph in self.cells.items() if glyph in wanted}
 
 
+def level_colour(level):
+    if level >= 5:
+        return "35"
+    if level >= 3:
+        return "33"
+    return "32"
+
+
+def hp_colour(hp, max_hp):
+    if hp * 3 < max_hp:
+        return frozenset({"31"})
+    if hp * 3 < max_hp * 2:
+        return frozenset({"33"})
+    return frozenset({"32"})
+
+
 class Screen:
     def __init__(self):
         self.rows = collections.defaultdict(dict)
         self.cursor = (1, 1)
+        self.style = PLAIN
+        self.first = True
+
+    def type(self, text):
+        row, col = self.cursor
+        for char in text:
+            if char == "\n":
+                row, col = row + 1, 1
+            elif char == "\r":
+                col = 1
+            else:
+                self.rows[row][col] = (char, PLAIN)
+                col += 1
+        self.cursor = (row, col)
 
     def apply(self, update):
         pos = 0
@@ -209,37 +268,230 @@ class Screen:
             self._control(control.group(1), control.group(2))
             pos = control.end()
         self._write(update[pos:])
+        self.cursor = (PARK_ROW, 1)
+        self.style = PLAIN
+        self.first = False
 
     def _write(self, text):
         if not text:
             return
         row, col = self.cursor
+        if row > FRAME_ROWS or col + len(text) - 1 > FRAME_COLS:
+            raise Failure(f"an update painted {text!r} outside the {FRAME_COLS}x{FRAME_ROWS} "
+                          f"frame, at row {row} column {col}")
         cells = self.rows[row]
         for char in text:
-            cells[col] = char
+            if char < " " or char == "\x7f":
+                raise Failure(f"an update carried the control character {char!r}")
+            cells[col] = (char, self.style)
             col += 1
         self.cursor = (row, col)
 
     def _control(self, params, final):
         if final == "H":
             self.cursor = position(params)
-        elif final == "K":
+        elif final == "K" and params in ("", "0"):
             self._erase_right()
+        elif final == "J" and params in ("", "0") and self.first:
+            self._erase_below()
+        elif final == "m":
+            self._select(params)
+        else:
+            raise Failure("an update used a control other than absolute addressing, "
+                          f"erase-right and colour: ESC[{params}{final}")
+
+    def _select(self, params):
+        for code in params.split(";"):
+            if code in ("", "0"):
+                self.style = PLAIN
+            else:
+                self.style = self.style | {code}
 
     def _erase_right(self):
         row, col = self.cursor
+        if row > FRAME_ROWS:
+            raise Failure(f"an update erased row {row}, below the frame")
         cells = self.rows[row]
         for stale in [at for at in cells if at >= col]:
             del cells[stale]
 
-    def text(self):
-        return "\n".join(self._line(row) for row in range(1, SCREEN_ROWS + 1))
+    def _erase_below(self):
+        self._erase_right()
+        for row in [at for at in self.rows if at > self.cursor[0]]:
+            del self.rows[row]
+
+    def picture(self):
+        return Picture({row: dict(cells) for row, cells in self.rows.items() if cells})
+
+
+class Picture:
+    def __init__(self, rows):
+        self.rows = rows
+        self.lines = [self._line(row) for row in range(1, SCREEN_ROWS + 1)]
 
     def _line(self, row):
         cells = self.rows.get(row)
         if not cells:
             return ""
-        return "".join(cells.get(col, " ") for col in range(1, max(cells) + 1))
+        return "".join(cells.get(col, (" ", PLAIN))[0] for col in range(1, max(cells) + 1))
+
+    def line(self, row):
+        return self.lines[row - 1]
+
+    def style(self, row, col):
+        return self.rows.get(row, {}).get(col, (" ", PLAIN))[1]
+
+    def text(self):
+        return "\n".join(self.lines)
+
+
+class ScreenCheck:
+    def __init__(self, picture):
+        self.picture = picture
+        self.heroes = []
+
+    def run(self):
+        row = self._header()
+        row = self._grid(row)
+        row = self._legend(row)
+        row = self._roster(row)
+        row = self._enemies(row)
+        last = self._log(row)
+        self._below(last)
+        self._map_colours()
+        return last
+
+    def fail(self, row, what):
+        raise Failure(f"screen row {row} {what}: {self.picture.line(row)!r}")
+
+    def exact(self, row, text):
+        if self.picture.line(row) != text:
+            self.fail(row, f"should read {text!r}")
+
+    def span(self, row, col, length, style, what):
+        for at in range(col, col + length):
+            found = self.picture.style(row, at)
+            if found != style:
+                raise Failure(f"screen row {row} column {at} ({what}) has colour "
+                              f"{sorted(found)} instead of {sorted(style)}")
+
+    def _header(self):
+        line = self.picture.line(1)
+        if not re.fullmatch(r"=== CMD RPG \[\d+ moves\] ===", line):
+            self.fail(1, "should be the header on the top screen row")
+        self.span(1, 1, len(line), BOLD_CYAN, "header")
+        self.exact(2, "")
+        return 3
+
+    def _border(self, row):
+        if not BORDER_RE.match(self.picture.line(row)):
+            self.fail(row, "should be a map border")
+        self.span(row, 1, 2, PLAIN, "border indent")
+        self.span(row, 3, 83, DIM, "border")
+
+    def _grid(self, row):
+        self._border(row)
+        for y in range(40):
+            line = self.picture.line(row + 1 + y)
+            if not ROW_RE.match(line):
+                self.fail(row + 1 + y, f"should be map row {y}")
+            self.span(row + 1 + y, 3, 1, DIM, "left side bar")
+            self.span(row + 1 + y, 84, 1, DIM, "right side bar")
+        self._border(row + 41)
+        return row + 42
+
+    def _legend(self, row):
+        self.exact(row, "  " + LEGEND)
+        for glyph, word, style in LEGEND_STYLES:
+            offset = LEGEND.index(f"{glyph} {word}")
+            self.span(row, 3 + offset, 1, style, f"legend {glyph}")
+            self.span(row, 5 + offset, len(word), PLAIN, f"legend {word}")
+        self.exact(row + 1, "")
+        self.exact(row + 2, "  Heroes:")
+        self.span(row + 2, 3, 7, BOLD_CYAN, "Heroes:")
+        return row + 3
+
+    def _roster(self, row):
+        while not ENEMIES_RE.match(self.picture.line(row)):
+            if row >= FRAME_ROWS:
+                self.fail(row, "roster runs off the frame")
+            party = PARTY_RE.match(self.picture.line(row))
+            if party:
+                row = self._party(row, len(party.group(1).split(" + ")))
+            else:
+                row = self._hero(row, 4, "@")
+        return row
+
+    def _party(self, row, members):
+        self.span(row, 3, len(self.picture.line(row)) - 2, BOLD_CYAN, "party header")
+        row = self._hero(row + 1, 4, "&")
+        for _ in range(members - 1):
+            row = self._hero(row, 6, "+")
+        self.exact(row, "")
+        return row + 1
+
+    def _hero(self, row, indent, icon):
+        line = self.picture.line(row)
+        match = HERO_RE.match(line)
+        if not match or len(match.group(1)) != indent or match.group(2) != icon:
+            self.fail(row, f"should be a hero line indented {indent} with icon {icon}")
+        hp_start = match.start(6) - 3
+        self.span(row, 1, indent, PLAIN, "roster indent")
+        self.span(row, indent + 1, 1, ROSTER_ICON_STYLES[icon], "roster icon")
+        self.span(row, match.start(3) + 1, len(match.group(3)), BOLD, "hero name")
+        self.span(row, match.end(3) + 1, hp_start - match.end(3), PLAIN, "race and level")
+        self.span(row, hp_start + 1, match.end(7) - hp_start,
+                  hp_colour(int(match.group(6)), int(match.group(7))), "HP")
+        self.span(row, match.end(7) + 1, match.start(10) - match.end(7), PLAIN, "XP")
+        self.span(row, match.start(10) + 1, match.end(10) - match.start(10) + 1, YELLOW, "gold")
+        self.span(row, match.end(10) + 2, len(line) - match.end(10) - 1, PLAIN, "bonus")
+        self.heroes.append((icon, int(match.group(5))))
+        return row + 1
+
+    def _enemies(self, row):
+        self.span(row, 3, len(self.picture.line(row)) - 2, DIM_RED, "enemy count")
+        self.exact(row + 1, "")
+        self.exact(row + 2, "  Log:")
+        self.span(row + 2, 3, 4, BOLD_YELLOW, "Log:")
+        return row + 3
+
+    def _log(self, row):
+        first = row
+        while row <= FRAME_ROWS and LOG_RE.match(self.picture.line(row)):
+            line = self.picture.line(row)
+            if line == "    > (quiet...)":
+                self.span(row, 5, len(line) - 4, DIM, "quiet line")
+            else:
+                self.span(row, 5, 2, DIM, "log marker")
+                self.span(row, 7, len(line) - 6, PLAIN, "log entry")
+            row += 1
+        count = row - first
+        if count == 0:
+            self.fail(first, "should be the first log line")
+        if count > 12:
+            self.fail(row - 1, "is a thirteenth log line")
+        if count > 1 and "    > (quiet...)" in self.picture.lines[first - 1:row - 1]:
+            self.fail(first, "shows a stale quiet line among the log entries")
+        return row - 1
+
+    def _below(self, last):
+        for row in range(last + 1, SCREEN_ROWS + 1):
+            if self.picture.line(row):
+                self.fail(row, "should be blank below the frame, but holds stale text")
+
+    def _map_colours(self):
+        allowed = {icon: {frozenset({"1", level_colour(level)}) for i, level in self.heroes if i == icon}
+                   for icon in "@&"}
+        for y in range(40):
+            row = 4 + y
+            for x in range(40):
+                col = 4 + 2 * x
+                glyph = self.picture.line(row)[col - 1]
+                styles = MAP_STYLES.get(glyph) or allowed.get(glyph, set())
+                if self.picture.style(row, col) not in styles:
+                    raise Failure(f"map cell ({x},{y}) {glyph!r} has colour "
+                                  f"{sorted(self.picture.style(row, col))}, not one of "
+                                  f"{[sorted(s) for s in styles]}")
 
 
 def position(params):
@@ -261,6 +513,10 @@ class Game:
         self.boot_text = ""
         self.seen_frame = False
         self.screen = Screen()
+        self.first_size = None
+        self.largest_update = 0
+        self.tallest = 0
+        self.last_moves = None
 
     def start(self):
         self.proc = subprocess.Popen(
@@ -283,23 +539,63 @@ class Game:
             buffer += chunk
             while True:
                 end = buffer.find(FRAME_END)
+                shown = buffer.find(CURSOR_SHOW)
+                if shown >= 0 and shown != end + len(FRAME_END) - len(CURSOR_SHOW):
+                    self.exit_reason = "an update did not end by parking the cursor on row 75"
+                    self.frames.put(None)
+                    return
                 if end < 0:
                     break
                 update = buffer[:end + len(FRAME_END)]
                 buffer = buffer[end + len(FRAME_END):]
-                self._apply(update)
+                try:
+                    self._apply(update)
+                except Failure as problem:
+                    self.exit_reason = str(problem)
+                    self.frames.put(None)
+                    return
 
     def _apply(self, update):
         start = update.find(FRAME_START)
         if start < 0:
-            self.exit_reason = "an update arrived without its cursor-hide marker"
-            self.frames.put(None)
-            return
+            raise Failure("an update arrived without its cursor-hide marker")
+        if self.seen_frame and start > 0:
+            raise Failure(f"bytes outside the update brackets: {update[:start][:80]!r}")
         if not self.seen_frame:
-            self.boot_text += ANSI.sub("", update[:start].decode("utf-8", "replace"))
+            boot = ANSI.sub("", update[:start].decode("utf-8", "replace"))
+            self.boot_text += boot
+            self.screen.type(boot)
+        piece = update[start:]
+        body = piece[len(FRAME_START):-len(FRAME_END)]
+        self._check_bytes(len(piece), body)
+        self.screen.apply(body.decode("utf-8", "replace"))
         self.seen_frame = True
-        self.screen.apply(update[start + len(FRAME_START):].decode("utf-8", "replace"))
-        self.frames.put(self.screen.text())
+        self.frames.put(self.screen.picture())
+
+    def _check_bytes(self, size, body):
+        if FRAME_START in body or CURSOR_SHOW in body:
+            raise Failure("an update hid or showed the cursor between its brackets")
+        if CLEAR_SCREEN.search(body):
+            raise Failure("an update cleared the screen")
+        if not self.seen_frame:
+            self._check_first(size, body)
+            return
+        if size >= UPDATE_LIMIT:
+            raise Failure(f"a later update is {size} bytes, not under {UPDATE_LIMIT}")
+        if HOME.search(body):
+            raise Failure("a later update addressed home again: a full repaint")
+        if ERASE_BELOW.search(body):
+            raise Failure("a later update erased below the cursor: a full repaint")
+        self.largest_update = max(self.largest_update, size)
+
+    def _check_first(self, size, body):
+        if not HOME.match(body):
+            raise Failure("the first update does not start by addressing row 1 column 1")
+        if size >= FIRST_UPDATE_LIMIT:
+            raise Failure(f"the first update is {size} bytes, not under {FIRST_UPDATE_LIMIT}")
+        if len(HOME.findall(body)) != 1 or len(ERASE_BELOW.findall(body)) > 1:
+            raise Failure("the first update holds more than one home or erase-below")
+        self.first_size = size
 
     def stop(self):
         if not self.proc or self.proc.poll() is not None:
@@ -328,7 +624,16 @@ class Game:
     def _frame(self, item):
         if item is None:
             raise Failure(f"[{self.label}] {self.exit_reason}")
-        return Frame(item, time.time())
+        try:
+            last_row = ScreenCheck(item).run()
+            frame = Frame(item.text(), time.time())
+        except Failure as problem:
+            raise Failure(f"[{self.label}] {problem}\n{item.text()}")
+        if self.last_moves is not None and frame.moves < self.last_moves:
+            raise Failure(f"[{self.label}] move counter went backwards")
+        self.last_moves = frame.moves
+        self.tallest = max(self.tallest, last_row)
+        return frame
 
 
 class Engine:
@@ -347,6 +652,8 @@ class Engine:
         self.floor_heroes = None
         self.floor_heroes_at = None
         self.flags_respawned = set()
+        self.last_log = 0
+        self.last_enemies = None
 
     def need(self, desc, deadline, check, key=None):
         if key:
@@ -370,11 +677,26 @@ class Engine:
         for obligation in self.obligations:
             if not obligation["met"] and obligation["check"](frame):
                 obligation["met"] = True
+        self._shrinks(frame)
         expired = [o["desc"] for o in self.obligations
                    if not o["met"] and frame.at > o["deadline"]]
         if expired:
             raise Failure(f"[{self.label}] obligation expired: " + "; ".join(expired))
         self.known.update(frame.heroes)
+
+    def _shrinks(self, frame):
+        if self.last_log >= 2 and frame.quiet:
+            self.flags.add("log_shrink")
+        self.last_log = len(frame.log)
+        if self.last_enemies is not None and self.last_enemies >= 10 > frame.enemies:
+            self.flags.add("enemy_count_narrowed")
+        self.last_enemies = frame.enemies
+        for name, afters in frame.heroes.items():
+            befores = self.known.get(name, [])
+            if any(a.width < b.width for a in afters for b in befores):
+                self.flags.add("line_narrowed")
+            if any(a.gold < 10 <= b.gold for a in afters for b in befores):
+                self.flags.add("gold_narrowed")
 
     def _population(self, frame, count, full, label):
         floor_attr, at_attr = f"floor_{label}", f"floor_{label}_at"
@@ -539,7 +861,8 @@ class Engine:
 
 
 REQUIRED = {"hit", "kill", "respawn_enemy", "levelup", "drop", "death",
-            "respawn_back", "inn", "shop", "party", "party_kill", "pvp"}
+            "respawn_back", "inn", "shop", "party", "party_kill", "pvp",
+            "log_shrink", "line_narrowed"}
 
 
 def check_boot(game, engine):
@@ -579,6 +902,18 @@ def global_missing(engines, shared):
     for _game, engine in engines:
         gaps.update(f"unmet: {desc}" for desc in engine.unmet())
     return sorted(gaps)
+
+
+def report_rendering(gen_no, pairs):
+    games = [game for game, _engine in pairs if game.first_size]
+    if not games:
+        return
+    print(f"[gen {gen_no}] smooth rendering ok on {len(games)} worlds: one home address and "
+          f"no clear or erase-below; first update at most {max(g.first_size for g in games)} "
+          f"bytes, later updates at most {max(g.largest_update for g in games)} bytes, all "
+          f"parked at row 75; only absolute addressing, erase-right and colour; screen never "
+          f"stale, always well-formed and correctly coloured; tallest frame "
+          f"{max(g.tallest for g in games)} rows", flush=True)
 
 
 def run_gate_step():
@@ -660,6 +995,7 @@ def main():
         finally:
             for game, _engine in pairs:
                 game.stop()
+        report_rendering(gen_no, pairs)
         if finished:
             break
         print(f"[gen {gen_no}] missing: {global_missing(pairs, shared)}", flush=True)
