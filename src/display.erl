@@ -3,6 +3,9 @@
 
 -define(MAP_SIZE, 40).
 -define(IDLE_TIMEOUT, 10000).
+-define(FRAME_ROWS, 74).
+-define(PARK_ROW, 75).
+-define(FRAME_COLS, 85).
 
 -define(RESET,   "\e[0m").
 -define(BOLD,    "\e[1m").
@@ -15,65 +18,127 @@
 -define(WHITE,   "\e[37m").
 -define(DIM,     "\e[2m").
 
+-define(HIDE, "\e[?25l").
+-define(SHOW, "\e[?25h").
+-define(ERASE_RIGHT, "\e[K").
+
 start(WorldPid) ->
     start(WorldPid, ?IDLE_TIMEOUT).
 
 start(_WorldPid, Timeout) ->
-    spawn(fun() -> loop(Timeout) end).
+    spawn(fun() -> loop(Timeout, dirty_screen()) end).
 
-loop(Timeout) ->
+loop(Timeout, Painted) ->
     receive
         {render, Characters, Enemies, Shops, Inns, EventLog, MoveCount} ->
-            render(Characters, Enemies, Shops, Inns, EventLog, MoveCount),
-            loop(Timeout)
+            Lines = frame_lines(Characters, Enemies, Shops, Inns, EventLog, MoveCount),
+            io:format("~s", [update(Painted, Lines)]),
+            loop(Timeout, Lines)
     after Timeout ->
-        loop(Timeout)
+        loop(Timeout, Painted)
     end.
 
-render(Characters, Enemies, Shops, Inns, EventLog, MoveCount) ->
-    io:format("\e[?25l\e[H", []),
-    print_header(MoveCount),
-    print_map(Characters, Enemies, Shops, Inns),
-    print_legend(),
-    print_roster(Characters),
-    print_enemies_summary(Enemies),
-    print_events(EventLog),
-    io:format("\e[J\e[?25h", []).
+dirty_screen() ->
+    lists:duplicate(?FRAME_ROWS, lists:duplicate(?FRAME_COLS, dirty)).
 
-print_header(MoveCount) ->
-    io:format("~s~s=== CMD RPG [~p moves] ===~s\e[K~n\e[K~n",
-              [?BOLD, ?CYAN, MoveCount, ?RESET]).
+update(Painted, Lines) ->
+    [?HIDE, frame_ops(Painted, Lines), addr(?PARK_ROW, 1), ?SHOW].
 
-print_map(Characters, Enemies, Shops, Inns) ->
+frame_ops(Painted, Lines) ->
+    Height = max(length(Painted), length(Lines)),
+    Rows = lists:zip3(lists:seq(1, Height), fill(Painted, Height, []), fill(Lines, Height, [])),
+    [line_ops(Row, Was, Now) || {Row, Was, Now} <- Rows].
+
+fill(Items, Length, Filler) ->
+    Items ++ lists:duplicate(Length - length(Items), Filler).
+
+line_ops(_Row, Same, Same) ->
+    [];
+line_ops(Row, Was, Now) ->
+    Width = max(length(Was), length(Now)),
+    Cols = lists:zip3(lists:seq(1, Width), fill(Was, Width, blank), fill(Now, Width, blank)),
+    [[paint(Row, Col, Cells) || {Col, Cells} <- runs(Cols)],
+     clear_tail(Row, length(Was), length(Now))].
+
+runs([]) ->
+    [];
+runs([{_Col, Same, Same} | Rest]) ->
+    runs(Rest);
+runs([{Col, _Was, Now} | Rest]) ->
+    {Cells, Tail} = run_cells(Rest, [Now]),
+    [{Col, Cells} | runs(Tail)].
+
+run_cells([{_Col, Same, Same} | _] = Tail, Acc) ->
+    {lists:reverse(Acc), Tail};
+run_cells([], Acc) ->
+    {lists:reverse(Acc), []};
+run_cells([{_Col, _Was, Now} | Rest], Acc) ->
+    run_cells(Rest, [Now | Acc]).
+
+paint(Row, Col, Cells) ->
+    painted(Row, Col, [Cell || Cell <- Cells, Cell =/= blank]).
+
+painted(_Row, _Col, []) ->
+    [];
+painted(Row, Col, Cells) ->
+    [addr(Row, Col), cell_bytes(Cells, none), ?RESET].
+
+cell_bytes([], _Style) ->
+    [];
+cell_bytes([{Style, Char} | Rest], Style) ->
+    [Char | cell_bytes(Rest, Style)];
+cell_bytes([{Style, Char} | Rest], _Other) ->
+    [?RESET, Style, Char | cell_bytes(Rest, Style)].
+
+clear_tail(Row, WasWidth, NowWidth) when WasWidth > NowWidth ->
+    [addr(Row, NowWidth + 1), ?ERASE_RIGHT];
+clear_tail(_Row, _WasWidth, _NowWidth) ->
+    [].
+
+addr(Row, Col) ->
+    io_lib:format("\e[~p;~pH", [Row, Col]).
+
+frame_lines(Characters, Enemies, Shops, Inns, EventLog, MoveCount) ->
+    Lines = header_lines(MoveCount)
+        ++ map_lines(Characters, Enemies, Shops, Inns)
+        ++ [legend_line()]
+        ++ roster_lines(Characters)
+        ++ [enemies_line(Enemies)]
+        ++ event_lines(EventLog),
+    lists:sublist(Lines, ?FRAME_ROWS).
+
+styled_line(Parts) ->
+    Cells = [[{Style, Char} || Char <- lists:flatten(Text)] || {Style, Text} <- Parts],
+    lists:sublist(lists:append(Cells), ?FRAME_COLS).
+
+header_lines(MoveCount) ->
+    [styled_line([{?BOLD ++ ?CYAN, io_lib:format("=== CMD RPG [~p moves] ===", [MoveCount])}]), []].
+
+map_lines(Characters, Enemies, Shops, Inns) ->
     Grid = build_grid(Characters, Enemies, Shops, Inns),
-    print_border(),
-    lists:foreach(fun(Y) -> print_row(Y, Grid) end, lists:seq(0, ?MAP_SIZE - 1)),
-    print_border().
+    [border_line()] ++ [row_line(Y, Grid) || Y <- lists:seq(0, ?MAP_SIZE - 1)] ++ [border_line()].
 
-print_border() ->
-    io:format("  ~s+", [?DIM]),
-    lists:foreach(fun(_) -> io:format("--") end, lists:seq(1, ?MAP_SIZE)),
-    io:format("-+~s\e[K~n", [?RESET]).
+border_line() ->
+    styled_line([{"", "  "}, {?DIM, "+" ++ lists:duplicate(?MAP_SIZE * 2 + 1, $-) ++ "+"}]).
 
-print_row(Y, Grid) ->
-    io:format("  ~s|~s", [?DIM, ?RESET]),
-    lists:foreach(fun(X) -> print_cell(maps:get({X, Y}, Grid, empty)) end, lists:seq(0, ?MAP_SIZE - 1)),
-    io:format("~s|~s\e[K~n", [?DIM, ?RESET]).
+row_line(Y, Grid) ->
+    Cells = [cell_part(maps:get({X, Y}, Grid, empty)) || X <- lists:seq(0, ?MAP_SIZE - 1)],
+    styled_line([{"", "  "}, {?DIM, "|"}] ++ Cells ++ [{?DIM, "|"}]).
 
-print_cell(empty) ->
-    io:format("~s. ~s", [?DIM, ?RESET]);
-print_cell({shop, _Name}) ->
-    io:format("~s~s$ ~s", [?BOLD, ?YELLOW, ?RESET]);
-print_cell({inn, _Name}) ->
-    io:format("~s~sH ~s", [?BOLD, ?BLUE, ?RESET]);
-print_cell({char, _Name, Level, solo}) ->
-    io:format("~s~s@ ~s", [?BOLD, char_color(Level), ?RESET]);
-print_cell({char, _Name, Level, leader}) ->
-    io:format("~s~s& ~s", [?BOLD, char_color(Level), ?RESET]);
-print_cell({char, _Name, _Level, follower}) ->
-    io:format("~s~s+ ~s", [?DIM, ?CYAN, ?RESET]);
-print_cell({enemy, _Name, _Level}) ->
-    io:format("~s~s! ~s", [?BOLD, ?RED, ?RESET]).
+cell_part(empty) ->
+    {?DIM, ". "};
+cell_part({shop, _Name}) ->
+    {?BOLD ++ ?YELLOW, "$ "};
+cell_part({inn, _Name}) ->
+    {?BOLD ++ ?BLUE, "H "};
+cell_part({char, _Name, Level, solo}) ->
+    {?BOLD ++ char_color(Level), "@ "};
+cell_part({char, _Name, Level, leader}) ->
+    {?BOLD ++ char_color(Level), "& "};
+cell_part({char, _Name, _Level, follower}) ->
+    {?DIM ++ ?CYAN, "+ "};
+cell_part({enemy, _Name, _Level}) ->
+    {?BOLD ++ ?RED, "! "}.
 
 build_grid(Characters, Enemies, Shops, Inns) ->
     G0 = lists:foldl(fun(#{name := IName, x := IX, y := IY}, Acc) ->
@@ -113,20 +178,20 @@ char_color(Level) when Level >= 5 -> ?MAGENTA;
 char_color(Level) when Level >= 3 -> ?YELLOW;
 char_color(_Level) -> ?GREEN.
 
-print_legend() ->
-    io:format("  ~s~s@ ~sHero  ~s~s& ~sParty  ~s~s! ~sEnemy  ~s~s$ ~sShop  ~s~sH ~sInn~s\e[K~n",
-              [?BOLD, ?GREEN, ?RESET,
-               ?BOLD, ?GREEN, ?RESET,
-               ?BOLD, ?RED, ?RESET,
-               ?BOLD, ?YELLOW, ?RESET,
-               ?BOLD, ?BLUE, ?RESET,
-               ?RESET]).
+legend_line() ->
+    styled_line([{"", "  "},
+                 {?BOLD ++ ?GREEN, "@ "}, {"", "Hero  "},
+                 {?BOLD ++ ?GREEN, "& "}, {"", "Party  "},
+                 {?BOLD ++ ?RED, "! "}, {"", "Enemy  "},
+                 {?BOLD ++ ?YELLOW, "$ "}, {"", "Shop  "},
+                 {?BOLD ++ ?BLUE, "H "}, {"", "Inn"}]).
 
-print_roster(Characters) ->
-    io:format("~n  ~s~sHeroes:~s\e[K~n", [?BOLD, ?CYAN, ?RESET]),
+roster_lines(Characters) ->
     {Leaders, Solos, Followers} = split_roles(Characters),
-    lists:foreach(fun(Leader) -> print_party(Leader, Followers, Characters) end, Leaders),
-    print_solos(Solos).
+    Parties = [party_lines(Leader, Followers, Characters) || Leader <- Leaders],
+    [[], styled_line([{"", "  "}, {?BOLD ++ ?CYAN, "Heroes:"}])]
+        ++ lists:append(Parties)
+        ++ solo_lines(Solos).
 
 split_roles(Characters) ->
     maps:fold(fun(Pid, Info, {LAcc, SAcc, FAcc}) ->
@@ -137,16 +202,15 @@ split_roles(Characters) ->
         end
     end, {[], [], []}, Characters).
 
-print_party({_LeaderPid, LeaderInfo}, Followers, Characters) ->
+party_lines({_LeaderPid, LeaderInfo}, Followers, Characters) ->
     LName = maps:get(name, LeaderInfo),
     FollowerPids = maps:get(follower_pids, LeaderInfo, []),
     FollowerNames = follower_names(Followers, FollowerPids, Characters),
-    MemberStrs = [LName | FollowerNames],
-    io:format("  ~s~s--- Party: ~s ---~s\e[K~n",
-              [?BOLD, ?CYAN, string:join(MemberStrs, " + "), ?RESET]),
-    print_hero_line("    ", LeaderInfo),
-    print_followers(Followers, FollowerNames),
-    io:format("\e[K~n").
+    Members = string:join([LName | FollowerNames], " + "),
+    [styled_line([{"", "  "}, {?BOLD ++ ?CYAN, "--- Party: " ++ Members ++ " ---"}]),
+     hero_line("    ", LeaderInfo)]
+        ++ follower_lines(Followers, FollowerNames)
+        ++ [[]].
 
 follower_names(Followers, FollowerPids, Characters) ->
     [maps:get(name, FI) || FI <- Followers, is_follower_of(FI, FollowerPids, Characters)].
@@ -162,39 +226,30 @@ follower_named(FPid, Name, Characters) ->
         error -> false
     end.
 
-print_followers(Followers, FollowerNames) ->
-    lists:foreach(fun(FInfo) -> print_named_follower(FInfo, FollowerNames) end, Followers).
+follower_lines(Followers, FollowerNames) ->
+    [hero_line("      ", FInfo) || FInfo <- Followers,
+                                   lists:member(maps:get(name, FInfo), FollowerNames)].
 
-print_named_follower(FInfo, FollowerNames) ->
-    case lists:member(maps:get(name, FInfo), FollowerNames) of
-        true -> print_hero_line("      ", FInfo);
-        false -> ok
-    end.
-
-print_solos(Solos) ->
+solo_lines(Solos) ->
     SortedSolos = lists:sort(fun(A, B) ->
         maps:get(level, A) >= maps:get(level, B)
     end, Solos),
-    lists:foreach(fun(Info) ->
-        print_hero_line("    ", Info)
-    end, SortedSolos).
+    [hero_line("    ", Info) || Info <- SortedSolos].
 
-print_hero_line(Indent, Info) ->
-    Name = maps:get(name, Info),
-    RaceStr = util:race_label(maps:get(race, Info, human)),
+hero_line(Indent, Info) ->
     Level = maps:get(level, Info),
     Hp = maps:get(hp, Info),
     MaxHp = maps:get(max_hp, Info),
-    Exp = maps:get(exp, Info),
-    Needed = combat:exp_to_level(Level),
-    Gold = maps:get(gold, Info, 0),
-    AtkBonus = maps:get(attack_bonus, Info),
-    DefBonus = maps:get(defense_bonus, Info),
-    io:format("~s~s~s~s~s (~s) Lv~p  ~sHP:~p/~p~s  XP:~p/~p  ~s~pg~s~s\e[K~n",
-              [Indent, role_icon(maps:get(party_role, Info, solo)), ?BOLD, Name, ?RESET,
-               RaceStr, Level,
-               hp_color(Hp, MaxHp), Hp, MaxHp, ?RESET,
-               Exp, Needed, ?YELLOW, Gold, ?RESET, bonus_str(AtkBonus, DefBonus)]).
+    RaceStr = util:race_label(maps:get(race, Info, human)),
+    styled_line([{"", Indent},
+                 role_icon(maps:get(party_role, Info, solo)),
+                 {?BOLD, maps:get(name, Info)},
+                 {"", io_lib:format(" (~s) Lv~p  ", [RaceStr, Level])},
+                 {hp_color(Hp, MaxHp), io_lib:format("HP:~p/~p", [Hp, MaxHp])},
+                 {"", io_lib:format("  XP:~p/~p  ",
+                                    [maps:get(exp, Info), combat:exp_to_level(Level)])},
+                 {?YELLOW, io_lib:format("~pg", [maps:get(gold, Info, 0)])},
+                 {"", bonus_str(maps:get(attack_bonus, Info), maps:get(defense_bonus, Info))}]).
 
 hp_color(Hp, MaxHp) when Hp * 3 < MaxHp -> ?RED;
 hp_color(Hp, MaxHp) when Hp * 3 < MaxHp * 2 -> ?YELLOW;
@@ -205,24 +260,21 @@ bonus_str(A, 0) -> io_lib:format(" +~pATK", [A]);
 bonus_str(0, D) -> io_lib:format(" +~pDEF", [D]);
 bonus_str(A, D) -> io_lib:format(" +~pATK +~pDEF", [A, D]).
 
-role_icon(leader) -> io_lib:format("~s& ~s", [?CYAN, ?RESET]);
-role_icon(follower) -> io_lib:format("~s+ ~s", [?DIM, ?RESET]);
-role_icon(solo) -> io_lib:format("~s@ ~s", [?GREEN, ?RESET]).
+role_icon(leader) -> {?CYAN, "& "};
+role_icon(follower) -> {?DIM, "+ "};
+role_icon(solo) -> {?GREEN, "@ "}.
 
-print_enemies_summary(Enemies) ->
-    Count = maps:size(Enemies),
-    io:format("  ~s~sEnemies on map: ~p~s\e[K~n", [?DIM, ?RED, Count, ?RESET]).
+enemies_line(Enemies) ->
+    styled_line([{"", "  "},
+                 {?DIM ++ ?RED, io_lib:format("Enemies on map: ~p", [maps:size(Enemies)])}]).
 
-print_events(EventLog) ->
-    io:format("~n  ~s~sLog:~s\e[K~n", [?BOLD, ?YELLOW, ?RESET]),
-    print_event_lines(EventLog).
+event_lines(EventLog) ->
+    [[], styled_line([{"", "  "}, {?BOLD ++ ?YELLOW, "Log:"}])] ++ log_lines(EventLog).
 
-print_event_lines([]) ->
-    io:format("    ~s> (quiet...)~s\e[K~n", [?DIM, ?RESET]);
-print_event_lines(EventLog) ->
-    lists:foreach(fun(Evt) ->
-        io:format("    ~s> ~s~s\e[K~n", [?DIM, ?RESET, Evt])
-    end, recent(EventLog)).
+log_lines([]) ->
+    [styled_line([{"", "    "}, {?DIM, "> (quiet...)"}])];
+log_lines(EventLog) ->
+    [styled_line([{"", "    "}, {?DIM, "> "}, {"", Evt}]) || Evt <- recent(EventLog)].
 
 recent(EventLog) when length(EventLog) > 12 ->
     lists:nthtail(length(EventLog) - 12, EventLog);

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import collections
 import os
 import queue
 import re
@@ -10,9 +11,11 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-FRAME_START = b"\x1b[?25l\x1b[H"
-FRAME_END = b"\x1b[J\x1b[?25h"
+FRAME_START = b"\x1b[?25l"
+FRAME_END = b"\x1b[75;1H\x1b[?25h"
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+CSI = re.compile(r"\x1b\[([0-9;?]*)([A-Za-z])")
+SCREEN_ROWS = 75
 
 NAME = r"[\w ]+"
 HEADER_RE = re.compile(r"=== CMD RPG \[(\d+) moves\] ===")
@@ -194,6 +197,58 @@ class Frame:
         return {pos for pos, glyph in self.cells.items() if glyph in wanted}
 
 
+class Screen:
+    def __init__(self):
+        self.rows = collections.defaultdict(dict)
+        self.cursor = (1, 1)
+
+    def apply(self, update):
+        pos = 0
+        for control in CSI.finditer(update):
+            self._write(update[pos:control.start()])
+            self._control(control.group(1), control.group(2))
+            pos = control.end()
+        self._write(update[pos:])
+
+    def _write(self, text):
+        if not text:
+            return
+        row, col = self.cursor
+        cells = self.rows[row]
+        for char in text:
+            cells[col] = char
+            col += 1
+        self.cursor = (row, col)
+
+    def _control(self, params, final):
+        if final == "H":
+            self.cursor = position(params)
+        elif final == "K":
+            self._erase_right()
+
+    def _erase_right(self):
+        row, col = self.cursor
+        cells = self.rows[row]
+        for stale in [at for at in cells if at >= col]:
+            del cells[stale]
+
+    def text(self):
+        return "\n".join(self._line(row) for row in range(1, SCREEN_ROWS + 1))
+
+    def _line(self, row):
+        cells = self.rows.get(row)
+        if not cells:
+            return ""
+        return "".join(cells.get(col, " ") for col in range(1, max(cells) + 1))
+
+
+def position(params):
+    if not params:
+        return (1, 1)
+    row, _, col = params.partition(";")
+    return (int(row), int(col or "1"))
+
+
 class Game:
     def __init__(self, label):
         self.label = label
@@ -201,6 +256,8 @@ class Game:
         self.boot_text = ""
         self.proc = None
         self.seen_frame = False
+        self.screen = Screen()
+        self.exit_reason = "game exited unexpectedly"
 
     def start(self):
         self.proc = subprocess.Popen(
@@ -208,6 +265,7 @@ class Game:
             stderr=subprocess.STDOUT, bufsize=0)
         self.boot_text = ""
         self.seen_frame = False
+        self.screen = Screen()
         threading.Thread(target=self._pump, daemon=True).start()
 
     def _pump(self):
@@ -223,25 +281,24 @@ class Game:
                 return
             buffer += chunk
             while True:
-                start = buffer.find(FRAME_START)
-                if start < 0:
-                    if not self.seen_frame:
-                        self.boot_text += ANSI.sub("", buffer.decode("utf-8", "replace"))
-                    buffer = b""
+                end = buffer.find(FRAME_END)
+                if end < 0:
                     break
-                if start > 0:
-                    if not self.seen_frame:
-                        self.boot_text += ANSI.sub("", buffer[:start].decode("utf-8", "replace"))
-                    buffer = buffer[start:]
-                    continue
-                nxt = buffer.find(FRAME_START, len(FRAME_START))
-                if nxt < 0:
-                    break
-                raw = buffer[len(FRAME_START):nxt]
-                buffer = buffer[nxt:]
-                if FRAME_END in raw:
-                    self.seen_frame = True
-                    self.frames.put(ANSI.sub("", raw.decode("utf-8", "replace")))
+                update = buffer[:end + len(FRAME_END)]
+                buffer = buffer[end + len(FRAME_END):]
+                self._apply(update)
+
+    def _apply(self, update):
+        start = update.find(FRAME_START)
+        if start < 0:
+            self.exit_reason = "an update arrived without its cursor-hide marker"
+            self.frames.put(None)
+            return
+        if not self.seen_frame:
+            self.boot_text += ANSI.sub("", update[:start].decode("utf-8", "replace"))
+        self.seen_frame = True
+        self.screen.apply(update[start + len(FRAME_START):].decode("utf-8", "replace"))
+        self.frames.put(self.screen.text())
 
     def stop(self):
         if not self.proc or self.proc.poll() is not None:
@@ -259,7 +316,7 @@ class Game:
         except queue.Empty:
             raise Failure(f"[{self.label}] no frame within {timeout:.0f}s")
         if item is None:
-            raise Failure(f"[{self.label}] game exited unexpectedly")
+            raise Failure(f"[{self.label}] {self.exit_reason}")
         return Frame(item, time.time())
 
     def poll_frame(self):
@@ -268,7 +325,7 @@ class Game:
         except queue.Empty:
             return None
         if item is None:
-            raise Failure(f"[{self.label}] game exited unexpectedly")
+            raise Failure(f"[{self.label}] {self.exit_reason}")
         return Frame(item, time.time())
 
 

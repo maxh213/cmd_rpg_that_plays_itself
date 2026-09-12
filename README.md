@@ -17,12 +17,12 @@ rpg_app (entry point)
   -> world_server (gen_server: owns map, resolves combat, manages state)
      -> character processes (spawned per hero, AI movement loop)
      -> enemy processes (spawned per mob, random wandering)
-     -> display process (ANSI terminal renderer)
+     -> display process (differential ANSI renderer: full first frame, then only changed cells)
 ```
 
 ## Running
 
-Requires Erlang/OTP 25+.
+Requires Erlang/OTP 25+ and a terminal at least 85 columns by 75 rows: the renderer addresses cells absolutely and does not measure the terminal.
 
 ```bash
 make run
