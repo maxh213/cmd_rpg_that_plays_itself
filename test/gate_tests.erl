@@ -8,6 +8,7 @@ layers() ->
      {"enemy", 3},
      {"display", 3},
      {"world", 2},
+     {"frame", 2},
      {"combat", 1},
      {"screen", 0},
      {"util", 0}].
@@ -49,14 +50,15 @@ assert_no_reference(Module, Bin, Forbidden) ->
     ?assertEqual({Module, Forbidden, nomatch},
                  {Module, Forbidden, re:run(Bin, Pattern, [{capture, none}])}).
 
-screen_is_private_to_display_test() ->
-    lists:foreach(fun assert_screen_is_out_of_reach/1,
-                  src_modules() -- ["display", "screen"]).
+screen_and_frame_are_private_to_display_test() ->
+    lists:foreach(fun(Module) -> assert_no_reference(Module, src_text(Module), "screen") end,
+                  src_modules() -- ["display", "screen"]),
+    lists:foreach(fun(Module) -> assert_no_reference(Module, src_text(Module), "frame") end,
+                  src_modules() -- ["display", "frame"]).
 
-assert_screen_is_out_of_reach(Module) ->
-    ?assertEqual({Module, nomatch},
-                 {Module, re:run(src_text(Module), "(^|[^a-zA-Z0-9_])screen:",
-                                 [{capture, none}])}).
+terminal_io_lives_at_the_edges_test() ->
+    lists:foreach(fun(Module) -> assert_no_reference(Module, src_text(Module), "io") end,
+                  src_modules() -- ["rpg_app", "display"]).
 
 terminal_control_lives_in_screen_test() ->
     lists:foreach(fun assert_escape_code_free/1, src_modules() -- ["screen"]).

@@ -17,7 +17,8 @@ rpg_app (entry point)
   -> world_server (gen_server: owns map, resolves combat, manages state)
      -> character processes (spawned per hero, AI movement loop)
      -> enemy processes (spawned per mob, random wandering)
-     -> display process (builds each frame as styled lines of the world)
+     -> display process (the terminal edge: reads the size, writes the bytes)
+        -> frame (lays the world out as styled lines that fit the size)
         -> screen (the only module that speaks ANSI: clips the frame to the
            terminal, repaints in full when the size changes, otherwise diffs
            it against the last one and repaints just the changed runs)
