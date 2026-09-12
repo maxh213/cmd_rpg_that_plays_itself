@@ -1,9 +1,9 @@
 -module(display).
--export([start/1]).
+-export([start/1, start/2]).
 
 -define(MAP_SIZE, 40).
+-define(IDLE_TIMEOUT, 10000).
 
-%% ANSI color codes
 -define(RESET,   "\e[0m").
 -define(BOLD,    "\e[1m").
 -define(RED,     "\e[31m").
@@ -15,16 +15,19 @@
 -define(WHITE,   "\e[37m").
 -define(DIM,     "\e[2m").
 
-start(_WorldPid) ->
-    spawn(fun() -> loop() end).
+start(WorldPid) ->
+    start(WorldPid, ?IDLE_TIMEOUT).
 
-loop() ->
+start(_WorldPid, Timeout) ->
+    spawn(fun() -> loop(Timeout) end).
+
+loop(Timeout) ->
     receive
         {render, Characters, Enemies, Shops, Inns, EventLog, MoveCount} ->
             render(Characters, Enemies, Shops, Inns, EventLog, MoveCount),
-            loop()
-    after 10000 ->
-        loop()
+            loop(Timeout)
+    after Timeout ->
+        loop(Timeout)
     end.
 
 render(Characters, Enemies, Shops, Inns, EventLog, MoveCount) ->
@@ -43,36 +46,34 @@ print_header(MoveCount) ->
 
 print_map(Characters, Enemies, Shops, Inns) ->
     Grid = build_grid(Characters, Enemies, Shops, Inns),
-    io:format("  ~s+", [?DIM]),
-    lists:foreach(fun(_) -> io:format("--") end, lists:seq(1, ?MAP_SIZE)),
-    io:format("-+~s\e[K~n", [?RESET]),
-    lists:foreach(fun(Y) ->
-        io:format("  ~s|~s", [?DIM, ?RESET]),
-        lists:foreach(fun(X) ->
-            case maps:get({X, Y}, Grid, empty) of
-                empty ->
-                    io:format("~s. ~s", [?DIM, ?RESET]);
-                {shop, _Name} ->
-                    io:format("~s~s$ ~s", [?BOLD, ?YELLOW, ?RESET]);
-                {inn, _Name} ->
-                    io:format("~s~sH ~s", [?BOLD, ?BLUE, ?RESET]);
-                {char, _Name, Level, solo} ->
-                    Color = char_color(Level),
-                    io:format("~s~s@ ~s", [?BOLD, Color, ?RESET]);
-                {char, _Name, Level, leader} ->
-                    Color = char_color(Level),
-                    io:format("~s~s& ~s", [?BOLD, Color, ?RESET]);
-                {char, _Name, _Level, follower} ->
-                    io:format("~s~s+ ~s", [?DIM, ?CYAN, ?RESET]);
-                {enemy, _Name, _Level} ->
-                    io:format("~s~s! ~s", [?BOLD, ?RED, ?RESET])
-            end
-        end, lists:seq(0, ?MAP_SIZE - 1)),
-        io:format("~s|~s\e[K~n", [?DIM, ?RESET])
-    end, lists:seq(0, ?MAP_SIZE - 1)),
+    print_border(),
+    lists:foreach(fun(Y) -> print_row(Y, Grid) end, lists:seq(0, ?MAP_SIZE - 1)),
+    print_border().
+
+print_border() ->
     io:format("  ~s+", [?DIM]),
     lists:foreach(fun(_) -> io:format("--") end, lists:seq(1, ?MAP_SIZE)),
     io:format("-+~s\e[K~n", [?RESET]).
+
+print_row(Y, Grid) ->
+    io:format("  ~s|~s", [?DIM, ?RESET]),
+    lists:foreach(fun(X) -> print_cell(maps:get({X, Y}, Grid, empty)) end, lists:seq(0, ?MAP_SIZE - 1)),
+    io:format("~s|~s\e[K~n", [?DIM, ?RESET]).
+
+print_cell(empty) ->
+    io:format("~s. ~s", [?DIM, ?RESET]);
+print_cell({shop, _Name}) ->
+    io:format("~s~s$ ~s", [?BOLD, ?YELLOW, ?RESET]);
+print_cell({inn, _Name}) ->
+    io:format("~s~sH ~s", [?BOLD, ?BLUE, ?RESET]);
+print_cell({char, _Name, Level, solo}) ->
+    io:format("~s~s@ ~s", [?BOLD, char_color(Level), ?RESET]);
+print_cell({char, _Name, Level, leader}) ->
+    io:format("~s~s& ~s", [?BOLD, char_color(Level), ?RESET]);
+print_cell({char, _Name, _Level, follower}) ->
+    io:format("~s~s+ ~s", [?DIM, ?CYAN, ?RESET]);
+print_cell({enemy, _Name, _Level}) ->
+    io:format("~s~s! ~s", [?BOLD, ?RED, ?RESET]).
 
 build_grid(Characters, Enemies, Shops, Inns) ->
     G0 = lists:foldl(fun(#{name := IName, x := IX, y := IY}, Acc) ->
@@ -125,40 +126,54 @@ print_legend() ->
 
 print_roster(Characters) ->
     io:format("~n  ~s~sHeroes:~s\e[K~n", [?BOLD, ?CYAN, ?RESET]),
-    %% Split into parties and solos. Group followers under their leader.
-    {Leaders, Solos, Followers} = maps:fold(fun(Pid, Info, {LAcc, SAcc, FAcc}) ->
+    {Leaders, Solos, Followers} = split_roles(Characters),
+    lists:foreach(fun(Leader) -> print_party(Leader, Followers, Characters) end, Leaders),
+    print_solos(Solos).
+
+split_roles(Characters) ->
+    maps:fold(fun(Pid, Info, {LAcc, SAcc, FAcc}) ->
         case maps:get(party_role, Info, solo) of
             leader -> {[{Pid, Info} | LAcc], SAcc, FAcc};
             solo -> {LAcc, [Info | SAcc], FAcc};
             follower -> {LAcc, SAcc, [Info | FAcc]}
         end
-    end, {[], [], []}, Characters),
-    %% Print parties first
-    lists:foreach(fun({_LeaderPid, LeaderInfo}) ->
-        LName = maps:get(name, LeaderInfo),
-        FollowerPids = maps:get(follower_pids, LeaderInfo, []),
-        FollowerNames = [maps:get(name, FI) || FI <- Followers,
-                         lists:any(fun(FPid) ->
-                             case maps:find(FPid, Characters) of
-                                 {ok, FChar} -> maps:get(name, FChar) =:= maps:get(name, FI);
-                                 error -> false
-                             end
-                         end, FollowerPids)],
-        MemberStrs = [LName | FollowerNames],
-        io:format("  ~s~s--- Party: ~s ---~s\e[K~n",
-                  [?BOLD, ?CYAN, string:join(MemberStrs, " + "), ?RESET]),
-        print_hero_line("    ", LeaderInfo),
-        %% Print followers under the leader
-        lists:foreach(fun(FInfo) ->
-            FName = maps:get(name, FInfo),
-            case lists:member(FName, FollowerNames) of
-                true -> print_hero_line("      ", FInfo);
-                false -> ok
-            end
-        end, Followers),
-        io:format("\e[K~n")
-    end, Leaders),
-    %% Print solos
+    end, {[], [], []}, Characters).
+
+print_party({_LeaderPid, LeaderInfo}, Followers, Characters) ->
+    LName = maps:get(name, LeaderInfo),
+    FollowerPids = maps:get(follower_pids, LeaderInfo, []),
+    FollowerNames = follower_names(Followers, FollowerPids, Characters),
+    MemberStrs = [LName | FollowerNames],
+    io:format("  ~s~s--- Party: ~s ---~s\e[K~n",
+              [?BOLD, ?CYAN, string:join(MemberStrs, " + "), ?RESET]),
+    print_hero_line("    ", LeaderInfo),
+    print_followers(Followers, FollowerNames),
+    io:format("\e[K~n").
+
+follower_names(Followers, FollowerPids, Characters) ->
+    [maps:get(name, FI) || FI <- Followers, is_follower_of(FI, FollowerPids, Characters)].
+
+is_follower_of(FollowerInfo, FollowerPids, Characters) ->
+    lists:any(fun(FPid) ->
+        follower_named(FPid, maps:get(name, FollowerInfo), Characters)
+    end, FollowerPids).
+
+follower_named(FPid, Name, Characters) ->
+    case maps:find(FPid, Characters) of
+        {ok, FChar} -> maps:get(name, FChar) =:= Name;
+        error -> false
+    end.
+
+print_followers(Followers, FollowerNames) ->
+    lists:foreach(fun(FInfo) -> print_named_follower(FInfo, FollowerNames) end, Followers).
+
+print_named_follower(FInfo, FollowerNames) ->
+    case lists:member(maps:get(name, FInfo), FollowerNames) of
+        true -> print_hero_line("      ", FInfo);
+        false -> ok
+    end.
+
+print_solos(Solos) ->
     SortedSolos = lists:sort(fun(A, B) ->
         maps:get(level, A) >= maps:get(level, B)
     end, Solos),
@@ -168,37 +183,33 @@ print_roster(Characters) ->
 
 print_hero_line(Indent, Info) ->
     Name = maps:get(name, Info),
-    Race = maps:get(race, Info, human),
-    RaceStr = util:race_label(Race),
+    RaceStr = util:race_label(maps:get(race, Info, human)),
     Level = maps:get(level, Info),
     Hp = maps:get(hp, Info),
     MaxHp = maps:get(max_hp, Info),
     Exp = maps:get(exp, Info),
     Needed = combat:exp_to_level(Level),
     Gold = maps:get(gold, Info, 0),
-    PartyRole = maps:get(party_role, Info, solo),
     AtkBonus = maps:get(attack_bonus, Info),
     DefBonus = maps:get(defense_bonus, Info),
-    HpColor = if
-        Hp * 3 < MaxHp -> ?RED;
-        Hp * 3 < MaxHp * 2 -> ?YELLOW;
-        true -> ?GREEN
-    end,
-    BonusStr = case {AtkBonus, DefBonus} of
-        {0, 0} -> "";
-        {A, 0} -> io_lib:format(" +~pATK", [A]);
-        {0, D} -> io_lib:format(" +~pDEF", [D]);
-        {A, D} -> io_lib:format(" +~pATK +~pDEF", [A, D])
-    end,
-    RoleIcon = case PartyRole of
-        leader -> io_lib:format("~s& ~s", [?CYAN, ?RESET]);
-        follower -> io_lib:format("~s+ ~s", [?DIM, ?RESET]);
-        solo -> io_lib:format("~s@ ~s", [?GREEN, ?RESET])
-    end,
     io:format("~s~s~s~s~s (~s) Lv~p  ~sHP:~p/~p~s  XP:~p/~p  ~s~pg~s~s\e[K~n",
-              [Indent, RoleIcon, ?BOLD, Name, ?RESET, RaceStr, Level,
-               HpColor, Hp, MaxHp, ?RESET,
-               Exp, Needed, ?YELLOW, Gold, ?RESET, BonusStr]).
+              [Indent, role_icon(maps:get(party_role, Info, solo)), ?BOLD, Name, ?RESET,
+               RaceStr, Level,
+               hp_color(Hp, MaxHp), Hp, MaxHp, ?RESET,
+               Exp, Needed, ?YELLOW, Gold, ?RESET, bonus_str(AtkBonus, DefBonus)]).
+
+hp_color(Hp, MaxHp) when Hp * 3 < MaxHp -> ?RED;
+hp_color(Hp, MaxHp) when Hp * 3 < MaxHp * 2 -> ?YELLOW;
+hp_color(_Hp, _MaxHp) -> ?GREEN.
+
+bonus_str(0, 0) -> "";
+bonus_str(A, 0) -> io_lib:format(" +~pATK", [A]);
+bonus_str(0, D) -> io_lib:format(" +~pDEF", [D]);
+bonus_str(A, D) -> io_lib:format(" +~pATK +~pDEF", [A, D]).
+
+role_icon(leader) -> io_lib:format("~s& ~s", [?CYAN, ?RESET]);
+role_icon(follower) -> io_lib:format("~s+ ~s", [?DIM, ?RESET]);
+role_icon(solo) -> io_lib:format("~s@ ~s", [?GREEN, ?RESET]).
 
 print_enemies_summary(Enemies) ->
     Count = maps:size(Enemies),
@@ -206,15 +217,16 @@ print_enemies_summary(Enemies) ->
 
 print_events(EventLog) ->
     io:format("~n  ~s~sLog:~s\e[K~n", [?BOLD, ?YELLOW, ?RESET]),
-    case EventLog of
-        [] ->
-            io:format("    ~s> (quiet...)~s\e[K~n", [?DIM, ?RESET]);
-        _ ->
-            Recent = case length(EventLog) > 12 of
-                true -> lists:nthtail(length(EventLog) - 12, EventLog);
-                false -> EventLog
-            end,
-            lists:foreach(fun(Evt) ->
-                io:format("    ~s> ~s~s\e[K~n", [?DIM, ?RESET, Evt])
-            end, Recent)
-    end.
+    print_event_lines(EventLog).
+
+print_event_lines([]) ->
+    io:format("    ~s> (quiet...)~s\e[K~n", [?DIM, ?RESET]);
+print_event_lines(EventLog) ->
+    lists:foreach(fun(Evt) ->
+        io:format("    ~s> ~s~s\e[K~n", [?DIM, ?RESET, Evt])
+    end, recent(EventLog)).
+
+recent(EventLog) when length(EventLog) > 12 ->
+    lists:nthtail(length(EventLog) - 12, EventLog);
+recent(EventLog) ->
+    EventLog.

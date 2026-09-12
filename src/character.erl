@@ -1,89 +1,88 @@
 -module(character).
--export([start/1]).
+-export([start/3, start/4]).
 
-%% Each character is a fully autonomous process with its own movement timer.
-%% It queries the world server for its own state, decides what to do, and acts.
-start(Race) ->
-    Speed = util:race_speed(Race),
+start(Race, GetState, Move) ->
+    start(Race, util:race_speed(Race), GetState, Move).
+
+start(_Race, Speed, GetState, Move) ->
     spawn(fun() ->
-        %% Small random offset so characters don't all start in sync
         timer:sleep(rand:uniform(Speed)),
-        loop(Speed)
+        loop(Speed, GetState, Move)
     end).
 
-loop(Speed) ->
-    %% Query our own state from the world server
-    case world_server:get_my_state(self()) of
+loop(Speed, GetState, Move) ->
+    case GetState(self()) of
         dead ->
-            %% We've been removed; stop
             ok;
         undefined ->
-            %% Not registered yet, wait and retry
             timer:sleep(100),
-            loop(Speed);
+            loop(Speed, GetState, Move);
         {ok, MyInfo, WorldView} ->
-            case maps:get(party_role, MyInfo, solo) of
-                follower ->
-                    %% Followers don't act — just wait for release
-                    follower_loop(Speed);
-                _ ->
-                    Direction = decide_action(MyInfo, WorldView),
-                    world_server:move(self(), Direction),
-                    timer:sleep(Speed),
-                    loop(Speed)
-            end
+            act(Speed, GetState, Move, MyInfo, WorldView)
     end.
 
-%% Follower mode: don't move, check periodically if released
-follower_loop(Speed) ->
+act(Speed, GetState, Move, MyInfo, WorldView) ->
+    case maps:get(party_role, MyInfo, solo) of
+        follower ->
+            follower_loop(Speed, GetState, Move);
+        _ ->
+            Move(self(), decide_action(MyInfo, WorldView)),
+            timer:sleep(Speed),
+            loop(Speed, GetState, Move)
+    end.
+
+follower_loop(Speed, GetState, Move) ->
     receive
         {solo} ->
-            loop(Speed);
+            loop(Speed, GetState, Move);
         die ->
             ok
     after Speed ->
-        %% Check if we're still a follower
-        case world_server:get_my_state(self()) of
-            dead -> ok;
-            undefined -> ok;
-            {ok, MyInfo, _} ->
-                case maps:get(party_role, MyInfo, solo) of
-                    follower -> follower_loop(Speed);
-                    _ -> loop(Speed)
-                end
-        end
+        check_release(GetState(self()), Speed, GetState, Move)
     end.
 
-%% Character AI — decides direction based on own state + world view
+check_release(dead, _Speed, _GetState, _Move) ->
+    ok;
+check_release(undefined, _Speed, _GetState, _Move) ->
+    ok;
+check_release({ok, MyInfo, _WorldView}, Speed, GetState, Move) ->
+    case maps:get(party_role, MyInfo, solo) of
+        follower -> follower_loop(Speed, GetState, Move);
+        _ -> loop(Speed, GetState, Move)
+    end.
+
 decide_action(MyInfo, WorldView) ->
-    X = maps:get(x, MyInfo),
-    Y = maps:get(y, MyInfo),
     Hp = maps:get(hp, MyInfo),
     MaxHp = maps:get(max_hp, MyInfo),
-    Gold = maps:get(gold, MyInfo, 0),
-    PartyRole = maps:get(party_role, MyInfo, solo),
     AtInn = maps:get(at_inn, MyInfo, false),
+    case AtInn andalso Hp * 4 < MaxHp * 3 of
+        true -> stay;
+        false -> seek_goal(MyInfo, WorldView)
+    end.
+
+seek_goal(MyInfo, WorldView) ->
+    X = maps:get(x, MyInfo),
+    Y = maps:get(y, MyInfo),
+    Gold = maps:get(gold, MyInfo, 0),
     EnemyPositions = maps:get(enemy_positions, WorldView, []),
     ShopPositions = maps:get(shop_positions, WorldView, []),
     InnPositions = maps:get(inn_positions, WorldView, []),
-    %% If resting at inn and HP still low, stay put
-    case AtInn andalso Hp * 4 < MaxHp * 3 of
-        true -> stay;
-        false ->
-            IsLeader = PartyRole =:= leader,
-            case {Hp * 2 < MaxHp, Gold >= 5} of
-                {true, true} ->
-                    seek_target(X, Y, ShopPositions, EnemyPositions, 9);
-                {true, false} ->
-                    seek_target(X, Y, InnPositions, EnemyPositions, 9);
-                _ when IsLeader ->
-                    seek_enemy(X, Y, EnemyPositions, 8);
-                _ ->
-                    case Gold >= 15 of
-                        true -> seek_target(X, Y, ShopPositions, EnemyPositions, 6);
-                        false -> seek_enemy(X, Y, EnemyPositions, 7)
-                    end
-            end
+    case {maps:get(hp, MyInfo) * 2 < maps:get(max_hp, MyInfo), Gold >= 5} of
+        {true, true} -> seek_target(X, Y, ShopPositions, EnemyPositions, 9);
+        {true, false} -> seek_target(X, Y, InnPositions, EnemyPositions, 9);
+        {_, _} -> seek_combat_goal(MyInfo, X, Y, Gold, EnemyPositions, ShopPositions)
+    end.
+
+seek_combat_goal(MyInfo, X, Y, Gold, EnemyPositions, ShopPositions) ->
+    case maps:get(party_role, MyInfo, solo) =:= leader of
+        true -> seek_enemy(X, Y, EnemyPositions, 8);
+        false -> rich_or_fight(X, Y, Gold, EnemyPositions, ShopPositions)
+    end.
+
+rich_or_fight(X, Y, Gold, EnemyPositions, ShopPositions) ->
+    case Gold >= 15 of
+        true -> seek_target(X, Y, ShopPositions, EnemyPositions, 6);
+        false -> seek_enemy(X, Y, EnemyPositions, 7)
     end.
 
 seek_target(X, Y, PrimaryPositions, FallbackPositions, Chance) ->
@@ -114,15 +113,21 @@ move_toward(X, Y, EX, EY) ->
     DX = EX - X,
     DY = EY - Y,
     if
-        abs(DX) > abs(DY) ->
-            if DX > 0 -> east; true -> west end;
-        abs(DY) > abs(DX) ->
-            if DY > 0 -> south; true -> north end;
-        DX =:= 0 andalso DY =:= 0 ->
-            stay;
-        true ->
-            case rand:uniform(2) of
-                1 -> if DX > 0 -> east; true -> west end;
-                2 -> if DY > 0 -> south; true -> north end
-            end
+        abs(DX) > abs(DY) -> step_horizontal(DX);
+        abs(DY) > abs(DX) -> step_vertical(DY);
+        true -> break_tie(DX, DY)
     end.
+
+break_tie(0, 0) ->
+    stay;
+break_tie(DX, DY) ->
+    case rand:uniform(2) of
+        1 -> step_horizontal(DX);
+        2 -> step_vertical(DY)
+    end.
+
+step_horizontal(DX) when DX > 0 -> east;
+step_horizontal(_DX) -> west.
+
+step_vertical(DY) when DY > 0 -> south;
+step_vertical(_DY) -> north.

@@ -1,22 +1,23 @@
 -module(rpg_app).
--export([start/0]).
+-export([start/0, start/1]).
 
-%% Entry point — starts the world server and lets it run
 start() ->
+    start(fun erlang:halt/1).
+
+start(Halt) ->
     io:format("Starting CMD RPG...~n"),
     case world_server:start_link() of
         {ok, _Pid} ->
             io:format("World is alive. Watch the heroes fight!~n"),
             io:format("Press Ctrl+C to stop.~n~n"),
             timer:sleep(1000),
-            %% Keep the main process alive
-            wait_forever();
+            wait_forever(Halt);
         {error, Reason} ->
             io:format("Failed to start: ~p~n", [Reason]),
-            halt(1)
+            Halt(1)
     end.
 
-wait_forever() ->
+wait_forever(Halt) ->
     receive
-        stop -> halt(0)
+        stop -> Halt(0)
     end.

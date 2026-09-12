@@ -20,10 +20,6 @@ shuffle(List) ->
     Tagged = [{rand:uniform(), X} || X <- List],
     [X || {_, X} <- lists:sort(Tagged)].
 
-%%%===================================================================
-%%% Race system
-%%%===================================================================
-
 random_race() ->
     Races = [human, dwarf, dark_elf, gnome, treant, duckman],
     lists:nth(rand:uniform(length(Races)), Races).
@@ -50,7 +46,6 @@ race_name(duckman) ->
 pick(List) ->
     lists:nth(rand:uniform(length(List)), List).
 
-%% Stat bonuses per race
 race_bonuses(human)    -> #{hp_bonus => 3,  attack_bonus => 1, defense_bonus => 1};
 race_bonuses(dwarf)    -> #{hp_bonus => 6,  attack_bonus => 0, defense_bonus => 3};
 race_bonuses(dark_elf) -> #{hp_bonus => 0,  attack_bonus => 4, defense_bonus => 0};
@@ -58,7 +53,6 @@ race_bonuses(gnome)    -> #{hp_bonus => 0,  attack_bonus => 2, defense_bonus => 
 race_bonuses(treant)   -> #{hp_bonus => 10, attack_bonus => 0, defense_bonus => 0};
 race_bonuses(duckman)  -> #{hp_bonus => 2,  attack_bonus => 1, defense_bonus => 1}.
 
-%% Movement speed in ms — lower = faster. Each process ticks at its own rate.
 race_speed(dark_elf) -> 400;
 race_speed(gnome)    -> 450;
 race_speed(human)    -> 500;

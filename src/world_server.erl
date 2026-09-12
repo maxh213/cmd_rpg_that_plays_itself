@@ -13,32 +13,20 @@
 -define(DISPLAY_INTERVAL, 500).
 -define(RESPAWN_DELAY, 2500).
 
-%%%===================================================================
-%%% API
-%%%===================================================================
-
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-%% Called by character/enemy processes to move
 move(Pid, Direction) ->
     gen_server:cast(?MODULE, {move, Pid, Direction}).
 
-%% Full state dump (used by display)
 get_state() ->
     gen_server:call(?MODULE, get_state).
 
-%% Called by character processes to get their own info + a world view
 get_my_state(Pid) ->
     gen_server:call(?MODULE, {get_my_state, Pid}).
 
-%% Called by enemy processes to check if they're still alive
 get_enemy_state(Pid) ->
     gen_server:call(?MODULE, {get_enemy_state, Pid}).
-
-%%%===================================================================
-%%% gen_server callbacks
-%%%===================================================================
 
 init([]) ->
     rand:seed(exsss),
@@ -47,7 +35,6 @@ init([]) ->
     Shops = spawn_shops(?SHOP_COUNT),
     Inns = spawn_inns(?INN_COUNT),
     DisplayPid = display:start(self()),
-    %% Display refreshes on its own timer
     erlang:send_after(?DISPLAY_INTERVAL, self(), render),
     State = #{
         characters => Characters,
@@ -62,85 +49,86 @@ init([]) ->
 
 handle_call(get_state, _From, State) ->
     {reply, State, State};
-
 handle_call({get_my_state, Pid}, _From, State) ->
-    #{characters := Chars, enemies := Enemies, shops := Shops, inns := Inns} = State,
-    case maps:find(Pid, Chars) of
-        {ok, Info} ->
-            %% Build a lightweight world view for the character's AI
-            EnemyPositions = maps:fold(fun(_EPid, EInfo, Acc) ->
-                [{maps:get(x, EInfo), maps:get(y, EInfo)} | Acc]
-            end, [], Enemies),
-            ShopPositions = [{maps:get(x, S), maps:get(y, S)} || S <- Shops],
-            InnPositions = [{maps:get(x, I), maps:get(y, I)} || I <- Inns],
-            WorldView = #{enemy_positions => EnemyPositions,
-                          shop_positions => ShopPositions,
-                          inn_positions => InnPositions},
-            {reply, {ok, Info, WorldView}, State};
-        error ->
-            {reply, dead, State}
-    end;
-
+    {reply, character_view(Pid, State), State};
 handle_call({get_enemy_state, Pid}, _From, State) ->
-    #{enemies := Enemies} = State,
-    case maps:find(Pid, Enemies) of
-        {ok, Info} -> {reply, {ok, Info}, State};
-        error -> {reply, dead, State}
-    end;
-
+    {reply, enemy_view(Pid, maps:get(enemies, State)), State};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
-handle_cast({move, Pid, Direction}, State) ->
-    #{characters := Chars, enemies := Enemies, shops := Shops,
-      inns := Inns, event_log := Log, move_count := MC} = State,
-    case maps:find(Pid, Chars) of
-        {ok, Info} ->
-            case maps:get(party_role, Info, solo) of
-                follower ->
-                    {noreply, State};
-                _ ->
-                    {NewX, NewY} = apply_direction(Direction, maps:get(x, Info), maps:get(y, Info)),
-                    NewInfo = Info#{x := NewX, y := NewY},
-                    NewChars0 = move_followers(Pid, NewX, NewY, Chars#{Pid := NewInfo}),
-                    {NewChars1, InnLog} = check_inn_interaction(Pid, NewX, NewY, NewChars0, Inns),
-                    {NewChars2, ShopLog} = check_shop_interaction(Pid, NewX, NewY, NewChars1, Shops),
-                    {NewChars3, NewEnemies, CombatLog} = check_enemy_collisions(Pid, NewX, NewY, NewChars2, Enemies),
-                    %% Check party formation at inns periodically
-                    {NewChars4, PartyLog} = maybe_check_parties(MC, NewChars3, Inns),
-                    AllLog = InnLog ++ ShopLog ++ CombatLog ++ PartyLog,
-                    NewLog = trim_log(Log ++ AllLog, 50),
-                    {noreply, State#{characters := NewChars4, enemies := NewEnemies,
-                                     event_log := NewLog, move_count := MC + 1}}
-            end;
-        error ->
-            case maps:find(Pid, Enemies) of
-                {ok, EInfo} ->
-                    {NewX, NewY} = apply_direction(Direction, maps:get(x, EInfo), maps:get(y, EInfo)),
-                    NewEInfo = EInfo#{x := NewX, y := NewY},
-                    {noreply, State#{enemies := Enemies#{Pid := NewEInfo}}};
-                error ->
-                    {noreply, State}
-            end
-    end;
+character_view(Pid, State) ->
+    case maps:find(Pid, maps:get(characters, State)) of
+        {ok, Info} -> {ok, Info, world_view(State)};
+        error -> dead
+    end.
 
+enemy_view(Pid, Enemies) ->
+    case maps:find(Pid, Enemies) of
+        {ok, Info} -> {ok, Info};
+        error -> dead
+    end.
+
+world_view(State) ->
+    #{enemy_positions => enemy_positions(maps:get(enemies, State)),
+      shop_positions => place_positions(maps:get(shops, State)),
+      inn_positions => place_positions(maps:get(inns, State))}.
+
+enemy_positions(Enemies) ->
+    maps:fold(fun(_EPid, EInfo, Acc) ->
+        [{maps:get(x, EInfo), maps:get(y, EInfo)} | Acc]
+    end, [], Enemies).
+
+place_positions(Places) ->
+    [{maps:get(x, Place), maps:get(y, Place)} || Place <- Places].
+
+handle_cast({move, Pid, Direction}, State) ->
+    case maps:find(Pid, maps:get(characters, State)) of
+        {ok, Info} -> move_character(Pid, Info, Direction, State);
+        error -> move_non_character(Pid, Direction, State)
+    end;
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-%% Display refresh — runs on its own timer
+move_character(Pid, Info, Direction, State) ->
+    case maps:get(party_role, Info, solo) of
+        follower -> {noreply, State};
+        _ -> apply_character_move(Pid, Info, Direction, State)
+    end.
+
+move_non_character(Pid, Direction, State) ->
+    Enemies = maps:get(enemies, State),
+    case maps:find(Pid, Enemies) of
+        {ok, EInfo} ->
+            {NewX, NewY} = apply_direction(Direction, maps:get(x, EInfo), maps:get(y, EInfo)),
+            {noreply, State#{enemies := Enemies#{Pid := EInfo#{x := NewX, y := NewY}}}};
+        error ->
+            {noreply, State}
+    end.
+
+apply_character_move(Pid, Info, Direction, State) ->
+    #{characters := Chars, enemies := Enemies, shops := Shops,
+      inns := Inns, event_log := Log, move_count := MC} = State,
+    {NewX, NewY} = apply_direction(Direction, maps:get(x, Info), maps:get(y, Info)),
+    NewInfo = Info#{x := NewX, y := NewY},
+    NewChars0 = move_followers(Pid, NewX, NewY, Chars#{Pid := NewInfo}),
+    {NewChars1, InnLog} = check_inn_interaction(Pid, NewX, NewY, NewChars0, Inns),
+    {NewChars2, ShopLog} = check_shop_interaction(Pid, NewX, NewY, NewChars1, Shops),
+    {NewChars3, NewEnemies, CombatLog} = check_enemy_collisions(Pid, NewX, NewY, NewChars2, Enemies),
+    {NewChars4, PartyLog} = maybe_check_parties(MC, NewChars3, Inns),
+    AllLog = InnLog ++ ShopLog ++ CombatLog ++ PartyLog,
+    NewLog = trim_log(Log ++ AllLog, 50),
+    {noreply, State#{characters := NewChars4, enemies := NewEnemies,
+                     event_log := NewLog, move_count := MC + 1}}.
+
 handle_info(render, State) ->
     #{characters := Chars, enemies := Enemies, shops := Shops,
       inns := Inns, display_pid := DPid, event_log := Log, move_count := MC} = State,
-    %% Clear inn flags for characters not at an inn
-    InnPositions = [{maps:get(x, I), maps:get(y, I)} || I <- Inns],
+    InnPositions = place_positions(Inns),
     NewChars = clear_inn_flags(Chars, InnPositions),
-    %% Check PvP (characters that happen to share a cell)
     {NewChars2, PvpLog} = check_pvp_collisions(NewChars),
     DPid ! {render, NewChars2, Enemies, Shops, Inns, Log ++ PvpLog, MC},
     erlang:send_after(?DISPLAY_INTERVAL, self(), render),
     {noreply, State#{characters := NewChars2, event_log := []}};
-
-%% Respawn timers — each respawn schedules itself independently
 handle_info({respawn_char, Name, Race}, State) ->
     #{characters := Chars} = State,
     Bonuses = util:race_bonuses(Race),
@@ -153,28 +141,22 @@ handle_info({respawn_char, Name, Race}, State) ->
              defense_bonus => maps:get(defense_bonus, Bonuses, 0),
              gold => 0, party_role => solo, party_members => [],
              follower_pids => [], at_inn => false, inn_ticks => 0},
-    Pid = character:start(Race),
+    Pid = start_character(Race),
     NewLog = maps:get(event_log, State) ++ [io_lib:format("~s respawned!", [Name])],
     {noreply, State#{characters := Chars#{Pid => Info},
                      event_log := trim_log(NewLog, 50)}};
-
 handle_info({respawn_enemy, Name, Level}, State) ->
     #{enemies := Enemies} = State,
     {X, Y} = util:random_pos(?MAP_SIZE),
     MaxHp = Level * 4 + 5,
     Info = #{name => Name, level => Level, hp => MaxHp, max_hp => MaxHp,
              x => X, y => Y, type => enemy},
-    Pid = enemy:start(Level),
+    Pid = start_enemy(Level),
     NewLog = maps:get(event_log, State) ++ [io_lib:format("A ~s appeared!", [Name])],
     {noreply, State#{enemies := Enemies#{Pid => Info},
                      event_log := trim_log(NewLog, 50)}};
-
 handle_info(_Msg, State) ->
     {noreply, State}.
-
-%%%===================================================================
-%%% Internal functions
-%%%===================================================================
 
 apply_direction(north, X, Y) -> {X, util:clamp(Y - 1, 0, ?MAP_SIZE - 1)};
 apply_direction(south, X, Y) -> {X, util:clamp(Y + 1, 0, ?MAP_SIZE - 1)};
@@ -188,9 +170,11 @@ trim_log(Log, Max) ->
         false -> Log
     end.
 
-%%%-------------------------------------------------------------------
-%%% Spawning
-%%%-------------------------------------------------------------------
+start_character(Race) ->
+    character:start(Race, fun get_my_state/1, fun move/2).
+
+start_enemy(Level) ->
+    enemy:start(Level, fun get_enemy_state/1, fun move/2).
 
 spawn_characters(Count) ->
     lists:foldl(fun(_, Acc) ->
@@ -206,7 +190,7 @@ spawn_characters(Count) ->
                  defense_bonus => maps:get(defense_bonus, Bonuses, 0),
                  gold => 0, party_role => solo, party_members => [],
                  follower_pids => [], at_inn => false, inn_ticks => 0},
-        Pid = character:start(Race),
+        Pid = start_character(Race),
         Acc#{Pid => Info}
     end, #{}, lists:seq(1, Count)).
 
@@ -217,7 +201,7 @@ spawn_enemies(Count) ->
         MaxHp = Level * 4 + 5,
         Info = #{name => Name, level => Level, hp => MaxHp, max_hp => MaxHp,
                  x => X, y => Y, type => enemy},
-        Pid = enemy:start(Level),
+        Pid = start_enemy(Level),
         Acc#{Pid => Info}
     end, #{}, lists:seq(1, Count)).
 
@@ -250,33 +234,28 @@ spawn_inns(Count) ->
         #{name => IName, x => X, y => Y}
     end, PickedNames).
 
-%%%-------------------------------------------------------------------
-%%% Inn interaction
-%%%-------------------------------------------------------------------
-
 check_inn_interaction(CharPid, X, Y, Chars, Inns) ->
-    AtInn = lists:any(fun(#{x := IX, y := IY}) -> IX =:= X andalso IY =:= Y end, Inns),
-    case AtInn of
+    case at_any_inn(X, Y, Inns) of
         false -> {Chars, []};
-        true ->
-            case maps:find(CharPid, Chars) of
-                {ok, CharInfo} ->
-                    Hp = maps:get(hp, CharInfo),
-                    MaxHp = maps:get(max_hp, CharInfo),
-                    CName = maps:get(name, CharInfo),
-                    OldTicks = maps:get(inn_ticks, CharInfo, 0),
-                    HealAmt = max(3, MaxHp div 5),
-                    NewHp = min(MaxHp, Hp + HealAmt),
-                    Healed = NewHp - Hp,
-                    C1 = CharInfo#{hp := NewHp, at_inn := true, inn_ticks := OldTicks + 1},
-                    HealLog = if
-                        Healed > 0 -> [io_lib:format("~s rests at the inn (+~pHP)", [CName, Healed])];
-                        true -> []
-                    end,
-                    {Chars#{CharPid := C1}, HealLog};
-                error -> {Chars, []}
-            end
+        true -> rest_at_inn(CharPid, Chars)
     end.
+
+at_any_inn(X, Y, Inns) ->
+    lists:any(fun(#{x := IX, y := IY}) -> IX =:= X andalso IY =:= Y end, Inns).
+
+rest_at_inn(CharPid, Chars) ->
+    CharInfo = maps:get(CharPid, Chars),
+    Hp = maps:get(hp, CharInfo),
+    MaxHp = maps:get(max_hp, CharInfo),
+    HealAmt = max(3, MaxHp div 5),
+    NewHp = min(MaxHp, Hp + HealAmt),
+    C1 = CharInfo#{hp := NewHp, at_inn := true,
+                   inn_ticks := maps:get(inn_ticks, CharInfo, 0) + 1},
+    {Chars#{CharPid := C1}, heal_log(maps:get(name, CharInfo), NewHp - Hp)}.
+
+heal_log(_Name, 0) -> [];
+heal_log(Name, Healed) ->
+    [io_lib:format("~s rests at the inn (+~pHP)", [Name, Healed])].
 
 clear_inn_flags(Chars, InnPositions) ->
     maps:map(fun(_Pid, Info) ->
@@ -289,93 +268,93 @@ clear_inn_flags(Chars, InnPositions) ->
         end
     end, Chars).
 
-%%%-------------------------------------------------------------------
-%%% Party formation — checked every N moves to avoid overhead
-%%%-------------------------------------------------------------------
-
 maybe_check_parties(MC, Chars, Inns) when MC rem 10 =:= 0 ->
     check_party_formation(Chars, Inns);
 maybe_check_parties(_MC, Chars, _Inns) ->
     {Chars, []}.
 
 check_party_formation(Chars, Inns) ->
-    lists:foldl(fun(#{x := IX, y := IY, name := InnName}, {AccChars, AccLog}) ->
-        Candidates = maps:fold(fun(Pid, Info, Acc) ->
-            case maps:get(party_role, Info, solo) =:= solo
-                 andalso maps:get(x, Info) =:= IX
-                 andalso maps:get(y, Info) =:= IY
-                 andalso maps:get(inn_ticks, Info, 0) >= ?PARTY_FORM_TICKS of
-                true -> [{Pid, Info} | Acc];
-                false -> Acc
-            end
-        end, [], AccChars),
-        case Candidates of
-            [{Pid1, I1}, {Pid2, I2} | _] ->
-                {LeaderPid, LeaderInfo, FollowerPid, FollowerInfo} =
-                    case maps:get(level, I1) >= maps:get(level, I2) of
-                        true  -> {Pid1, I1, Pid2, I2};
-                        false -> {Pid2, I2, Pid1, I1}
-                    end,
-                LName = maps:get(name, LeaderInfo),
-                FName = maps:get(name, FollowerInfo),
-                NewLeader = LeaderInfo#{
-                    party_role := leader,
-                    party_members := [FollowerInfo],
-                    follower_pids := [FollowerPid]
-                },
-                NewFollower = FollowerInfo#{
-                    party_role := follower,
-                    x := maps:get(x, LeaderInfo),
-                    y := maps:get(y, LeaderInfo)
-                },
-                FollowerPid ! {follow, LeaderPid},
-                NewChars = AccChars#{LeaderPid := NewLeader, FollowerPid := NewFollower},
-                PartyLog = [io_lib:format("~s and ~s formed a party at ~s!",
-                                          [LName, FName, InnName])],
-                {NewChars, AccLog ++ PartyLog};
-            _ ->
-                {AccChars, AccLog}
-        end
-    end, {Chars, []}, Inns).
+    lists:foldl(fun form_party_at_inn/2, {Chars, []}, Inns).
 
-move_followers(LeaderPid, NewX, NewY, Chars) ->
-    case maps:find(LeaderPid, Chars) of
-        {ok, LeaderInfo} ->
-            FollowerPids = maps:get(follower_pids, LeaderInfo, []),
-            %% Update follower positions in the Chars map
-            Chars2 = lists:foldl(fun(FPid, AccChars) ->
-                case maps:find(FPid, AccChars) of
-                    {ok, FInfo} ->
-                        AccChars#{FPid := FInfo#{x := NewX, y := NewY}};
-                    error -> AccChars
-                end
-            end, Chars, FollowerPids),
-            %% Sync party_members in leader with live follower state
-            UpdatedMembers = [case maps:find(FPid, Chars2) of
-                {ok, FI} -> FI;
-                error -> nil
-            end || FPid <- FollowerPids],
-            LiveMembers = [M || M <- UpdatedMembers, M =/= nil],
-            NewLeader = maps:get(LeaderPid, Chars2),
-            Chars2#{LeaderPid := NewLeader#{party_members := LiveMembers}};
-        error -> Chars
+form_party_at_inn(#{x := IX, y := IY, name := InnName}, {AccChars, AccLog}) ->
+    case party_candidates(IX, IY, AccChars) of
+        [{Pid1, I1}, {Pid2, I2} | _] ->
+            form_party(Pid1, I1, Pid2, I2, InnName, AccChars, AccLog);
+        _ ->
+            {AccChars, AccLog}
     end.
 
-disband_party(LeaderInfo, Chars) ->
+party_candidates(IX, IY, Chars) ->
+    maps:fold(fun(Pid, Info, Acc) ->
+        case party_eligible(Info, IX, IY) of
+            true -> [{Pid, Info} | Acc];
+            false -> Acc
+        end
+    end, [], Chars).
+
+party_eligible(Info, IX, IY) ->
+    maps:get(party_role, Info, solo) =:= solo
+        andalso maps:get(x, Info) =:= IX
+        andalso maps:get(y, Info) =:= IY
+        andalso maps:get(inn_ticks, Info, 0) >= ?PARTY_FORM_TICKS.
+
+form_party(Pid1, I1, Pid2, I2, InnName, AccChars, AccLog) ->
+    {LeaderPid, LeaderInfo, FollowerPid, FollowerInfo} = pick_leader(Pid1, I1, Pid2, I2),
+    LName = maps:get(name, LeaderInfo),
+    FName = maps:get(name, FollowerInfo),
+    NewLeader = LeaderInfo#{
+        party_role := leader,
+        party_members := [FollowerInfo],
+        follower_pids := [FollowerPid]
+    },
+    NewFollower = FollowerInfo#{
+        party_role := follower,
+        x := maps:get(x, LeaderInfo),
+        y := maps:get(y, LeaderInfo)
+    },
+    FollowerPid ! {follow, LeaderPid},
+    NewChars = AccChars#{LeaderPid := NewLeader, FollowerPid := NewFollower},
+    PartyLog = [io_lib:format("~s and ~s formed a party at ~s!",
+                              [LName, FName, InnName])],
+    {NewChars, AccLog ++ PartyLog}.
+
+pick_leader(Pid1, I1, Pid2, I2) ->
+    case maps:get(level, I1) >= maps:get(level, I2) of
+        true -> {Pid1, I1, Pid2, I2};
+        false -> {Pid2, I2, Pid1, I1}
+    end.
+
+move_followers(LeaderPid, NewX, NewY, Chars) ->
+    LeaderInfo = maps:get(LeaderPid, Chars),
     FollowerPids = maps:get(follower_pids, LeaderInfo, []),
+    Chars2 = pin_followers(FollowerPids, NewX, NewY, Chars),
+    UpdatedLeader = maps:get(LeaderPid, Chars2),
+    Chars2#{LeaderPid := UpdatedLeader#{party_members := live_members(FollowerPids, Chars2)}}.
+
+pin_followers(FollowerPids, X, Y, Chars) ->
     lists:foldl(fun(FPid, AccChars) ->
-        FPid ! {solo},
         case maps:find(FPid, AccChars) of
-            {ok, FInfo} ->
-                AccChars#{FPid := FInfo#{party_role := solo, party_members := [],
-                                         follower_pids := []}};
+            {ok, FInfo} -> AccChars#{FPid := FInfo#{x := X, y := Y}};
             error -> AccChars
         end
     end, Chars, FollowerPids).
 
-%%%-------------------------------------------------------------------
-%%% Shop interaction
-%%%-------------------------------------------------------------------
+live_members(FollowerPids, Chars) ->
+    [FInfo || FPid <- FollowerPids, {ok, FInfo} <- [maps:find(FPid, Chars)]].
+
+disband_party(LeaderInfo, Chars) ->
+    FollowerPids = maps:get(follower_pids, LeaderInfo, []),
+    lists:foldl(fun release_follower/2, Chars, FollowerPids).
+
+release_follower(FPid, AccChars) ->
+    FPid ! {solo},
+    case maps:find(FPid, AccChars) of
+        {ok, FInfo} ->
+            AccChars#{FPid := FInfo#{party_role := solo, party_members := [],
+                                     follower_pids := []}};
+        error ->
+            AccChars
+    end.
 
 shop_items() ->
     [
@@ -390,225 +369,256 @@ shop_items() ->
     ].
 
 check_shop_interaction(CharPid, X, Y, Chars, Shops) ->
-    AtShop = lists:any(fun(#{x := SX, y := SY}) -> SX =:= X andalso SY =:= Y end, Shops),
-    case AtShop of
+    case at_any_shop(X, Y, Shops) of
         false -> {Chars, []};
-        true ->
-            case maps:find(CharPid, Chars) of
-                {ok, CharInfo} ->
-                    Gold = maps:get(gold, CharInfo, 0),
-                    CName = maps:get(name, CharInfo),
-                    case pick_shop_purchase(Gold) of
-                        nothing -> {Chars, []};
-                        {ItemName, Cost, Effect} ->
-                            C1 = CharInfo#{gold := Gold - Cost},
-                            {C2, ItemLog} = apply_drop(C1, {ItemName, Effect}),
-                            BuyLog = [io_lib:format("~s bought ~s (-~pg)", [CName, ItemName, Cost])],
-                            {Chars#{CharPid := C2}, BuyLog ++ ItemLog}
-                    end;
-                error -> {Chars, []}
-            end
+        true -> buy_at_shop(CharPid, Chars)
+    end.
+
+at_any_shop(X, Y, Shops) ->
+    lists:any(fun(#{x := SX, y := SY}) -> SX =:= X andalso SY =:= Y end, Shops).
+
+buy_at_shop(CharPid, Chars) ->
+    CharInfo = maps:get(CharPid, Chars),
+    Gold = maps:get(gold, CharInfo, 0),
+    case pick_shop_purchase(Gold) of
+        nothing ->
+            {Chars, []};
+        {ItemName, Cost, Effect} ->
+            C1 = CharInfo#{gold := Gold - Cost},
+            {C2, ItemLog} = apply_drop(C1, {ItemName, Effect}),
+            BuyLog = [io_lib:format("~s bought ~s (-~pg)",
+                                    [maps:get(name, CharInfo), ItemName, Cost])],
+            {Chars#{CharPid := C2}, BuyLog ++ ItemLog}
     end.
 
 pick_shop_purchase(Gold) ->
-    Items = shop_items(),
-    Affordable = [{Name, Cost, Effect} || {Name, Cost, Effect} <- Items, Cost =< Gold],
+    Affordable = [{Name, Cost, Effect} || {Name, Cost, Effect} <- shop_items(), Cost =< Gold],
     case Affordable of
         [] -> nothing;
-        _ ->
-            case rand:uniform(10) of
-                N when N =< 4 ->
-                    Heals = [{Na, Co, Ef} || {Na, Co, Ef} <- Affordable,
-                              element(1, Ef) =:= hp_restore],
-                    case Heals of
-                        [] -> pick_best_stat(Affordable);
-                        _ -> lists:last(lists:sort(fun({_, C1, _}, {_, C2, _}) -> C1 =< C2 end, Heals))
-                    end;
-                _ ->
-                    pick_best_stat(Affordable)
-            end
+        _ -> pick_from(Affordable)
     end.
+
+pick_from(Affordable) ->
+    case rand:uniform(10) of
+        N when N =< 4 -> priciest(heals(Affordable));
+        _ -> pick_best_stat(Affordable)
+    end.
+
+heals(Items) ->
+    [{Na, Co, Ef} || {Na, Co, Ef} <- Items, element(1, Ef) =:= hp_restore].
+
+priciest(Items) ->
+    lists:last(lists:sort(fun({_, C1, _}, {_, C2, _}) -> C1 =< C2 end, Items)).
 
 pick_best_stat(Affordable) ->
     Stats = [{Na, Co, Ef} || {Na, Co, Ef} <- Affordable,
               element(1, Ef) =:= attack orelse element(1, Ef) =:= defense],
     case Stats of
-        [] ->
-            lists:last(lists:sort(fun({_, C1, _}, {_, C2, _}) -> C1 =< C2 end, Affordable));
-        _ ->
-            lists:last(lists:sort(fun({_, C1, _}, {_, C2, _}) -> C1 =< C2 end, Stats))
+        [] -> priciest(Affordable);
+        _ -> priciest(Stats)
     end.
-
-%%%-------------------------------------------------------------------
-%%% Combat
-%%%-------------------------------------------------------------------
 
 check_enemy_collisions(CharPid, X, Y, Chars, Enemies) ->
     EnemiesAtPos = maps:filter(fun(_EPid, EInfo) ->
         maps:get(x, EInfo) =:= X andalso maps:get(y, EInfo) =:= Y
     end, Enemies),
-    maps:fold(fun(EPid, EInfo, {AccChars, AccEnemies, AccLog}) ->
-        case maps:find(CharPid, AccChars) of
-            {ok, CharInfo} ->
-                IsLeader = maps:get(party_role, CharInfo, solo) =:= leader,
-                case IsLeader of
-                    true ->
-                        %% Build party from live Chars map, not stale party_members
-                        FollowerPids = maps:get(follower_pids, CharInfo, []),
-                        LiveMembers = [FI || FPid <- FollowerPids,
-                                       {ok, FI} <- [maps:find(FPid, AccChars)]],
-                        FullParty = [CharInfo | LiveMembers],
-                        resolve_group_enemy(CharPid, FullParty, EPid, EInfo,
-                                            AccChars, AccEnemies, AccLog);
-                    false ->
-                        resolve_solo_enemy(CharPid, CharInfo, EPid, EInfo,
-                                           AccChars, AccEnemies, AccLog)
-                end;
-            error ->
-                {AccChars, AccEnemies, AccLog}
-        end
+    maps:fold(fun(EPid, EInfo, Acc) ->
+        fight_at_cell(CharPid, EPid, EInfo, Acc)
     end, {Chars, Enemies, []}, EnemiesAtPos).
 
+fight_at_cell(CharPid, EPid, EInfo, {AccChars, AccEnemies, AccLog}) ->
+    case maps:find(CharPid, AccChars) of
+        {ok, CharInfo} ->
+            engage_enemy(CharPid, CharInfo, EPid, EInfo, AccChars, AccEnemies, AccLog);
+        error ->
+            {AccChars, AccEnemies, AccLog}
+    end.
+
+engage_enemy(CharPid, CharInfo, EPid, EInfo, AccChars, AccEnemies, AccLog) ->
+    case maps:get(party_role, CharInfo, solo) =:= leader of
+        true ->
+            FollowerPids = maps:get(follower_pids, CharInfo, []),
+            LiveMembers = [FInfo || FPid <- FollowerPids,
+                           {ok, FInfo} <- [maps:find(FPid, AccChars)]],
+            resolve_group_enemy(CharPid, [CharInfo | LiveMembers], EPid, EInfo,
+                                AccChars, AccEnemies, AccLog);
+        false ->
+            resolve_solo_enemy(CharPid, CharInfo, EPid, EInfo,
+                               AccChars, AccEnemies, AccLog)
+    end.
+
 resolve_solo_enemy(CharPid, CharInfo, EPid, EInfo, AccChars, AccEnemies, AccLog) ->
+    {Winner, _Loser, Dmg} = combat:resolve(CharInfo, EInfo),
+    case maps:get(name, Winner) =:= maps:get(name, CharInfo) of
+        true ->
+            solo_victory(CharPid, CharInfo, EPid, EInfo, Dmg, AccChars, AccEnemies, AccLog);
+        false ->
+            solo_defeat(CharPid, CharInfo, EInfo, Dmg, AccChars, AccEnemies, AccLog)
+    end.
+
+solo_victory(CharPid, CharInfo, EPid, EInfo, Dmg, AccChars, AccEnemies, AccLog) ->
+    NewEHp = maps:get(hp, EInfo) - Dmg,
+    case NewEHp =< 0 of
+        true ->
+            enemy_slain(CharPid, CharInfo, EPid, EInfo, AccChars, AccEnemies, AccLog);
+        false ->
+            {AccChars, AccEnemies#{EPid := EInfo#{hp := NewEHp}},
+             AccLog ++ [io_lib:format("~s hit ~s (-~pHP)",
+                                      [maps:get(name, CharInfo), maps:get(name, EInfo), Dmg])]}
+    end.
+
+enemy_slain(CharPid, CharInfo, EPid, EInfo, AccChars, AccEnemies, AccLog) ->
     CName = maps:get(name, CharInfo),
     EName = maps:get(name, EInfo),
     ELevel = maps:get(level, EInfo),
-    {Winner, _Loser, Dmg} = combat:resolve(CharInfo, EInfo),
-    WinnerName = maps:get(name, Winner),
-    CharWon = WinnerName =:= CName,
-    if
-        CharWon ->
-            NewEHp = maps:get(hp, EInfo) - Dmg,
-            if
-                NewEHp =< 0 ->
-                    XpGain = ELevel + 1,
-                    GoldGain = ELevel * 2 + rand:uniform(3),
-                    C1 = CharInfo#{exp := maps:get(exp, CharInfo) + XpGain,
-                                   gold := maps:get(gold, CharInfo, 0) + GoldGain},
-                    C2 = combat:check_level_up(C1),
-                    LvlLog = case maps:get(level, C2) > maps:get(level, CharInfo) of
-                        true -> [io_lib:format("~s leveled up to Lv~p!", [CName, maps:get(level, C2)])];
-                        false -> []
-                    end,
-                    Drop = combat:generate_drop(ELevel),
-                    {C3, DropLog} = apply_drop(C2, Drop),
-                    KillLog = [io_lib:format("~s slew ~s(Lv~p) [+~pXP +~pg]",
-                                             [CName, EName, ELevel, XpGain, GoldGain])],
-                    schedule_respawn_enemy(EName, ELevel),
-                    {AccChars#{CharPid := C3}, maps:remove(EPid, AccEnemies),
-                     AccLog ++ KillLog ++ LvlLog ++ DropLog};
-                true ->
-                    {AccChars, AccEnemies#{EPid := EInfo#{hp := NewEHp}},
-                     AccLog ++ [io_lib:format("~s hit ~s (-~pHP)", [CName, EName, Dmg])]}
-            end;
-        true ->
-            NewCHp = maps:get(hp, CharInfo) - Dmg,
-            if
-                NewCHp =< 0 ->
-                    Race = maps:get(race, CharInfo, human),
-                    schedule_respawn_char(CName, Race),
-                    NewChars = disband_party(CharInfo, maps:remove(CharPid, AccChars)),
-                    {NewChars, AccEnemies,
-                     AccLog ++ [io_lib:format("~s was mauled by ~s!", [CName, EName])]};
-                true ->
-                    {AccChars#{CharPid := CharInfo#{hp := NewCHp}}, AccEnemies,
-                     AccLog ++ [io_lib:format("~s hit by ~s (-~pHP)", [CName, EName, Dmg])]}
-            end
+    XpGain = ELevel + 1,
+    GoldGain = ELevel * 2 + rand:uniform(3),
+    C1 = CharInfo#{exp := maps:get(exp, CharInfo) + XpGain,
+                   gold := maps:get(gold, CharInfo, 0) + GoldGain},
+    C2 = combat:check_level_up(C1),
+    LvlLog = level_log(maps:get(level, CharInfo), maps:get(level, C2), CName),
+    Drop = combat:generate_drop(ELevel),
+    {C3, DropLog} = apply_drop(C2, Drop),
+    KillLog = [io_lib:format("~s slew ~s(Lv~p) [+~pXP +~pg]",
+                             [CName, EName, ELevel, XpGain, GoldGain])],
+    schedule_respawn_enemy(EName, ELevel),
+    {AccChars#{CharPid := C3}, maps:remove(EPid, AccEnemies),
+     AccLog ++ KillLog ++ LvlLog ++ DropLog}.
+
+level_log(OldLevel, NewLevel, Name) ->
+    case NewLevel > OldLevel of
+        true -> [io_lib:format("~s leveled up to Lv~p!", [Name, NewLevel])];
+        false -> []
     end.
+
+solo_defeat(CharPid, CharInfo, EInfo, Dmg, AccChars, AccEnemies, AccLog) ->
+    NewCHp = maps:get(hp, CharInfo) - Dmg,
+    case NewCHp =< 0 of
+        true ->
+            character_mauled(CharPid, CharInfo, EInfo, AccChars, AccEnemies, AccLog);
+        false ->
+            {AccChars#{CharPid := CharInfo#{hp := NewCHp}}, AccEnemies,
+             AccLog ++ [io_lib:format("~s hit by ~s (-~pHP)",
+                                      [maps:get(name, CharInfo), maps:get(name, EInfo), Dmg])]}
+    end.
+
+character_mauled(CharPid, CharInfo, EInfo, AccChars, AccEnemies, AccLog) ->
+    CName = maps:get(name, CharInfo),
+    Race = maps:get(race, CharInfo, human),
+    schedule_respawn_char(CName, Race),
+    NewChars = disband_party(CharInfo, maps:remove(CharPid, AccChars)),
+    {NewChars, AccEnemies,
+     AccLog ++ [io_lib:format("~s was mauled by ~s!", [CName, maps:get(name, EInfo)])]}.
 
 resolve_group_enemy(CharPid, FullParty, EPid, EInfo, AccChars, AccEnemies, AccLog) ->
-    LeaderName = maps:get(name, hd(FullParty)),
-    EName = maps:get(name, EInfo),
-    ELevel = maps:get(level, EInfo),
     {Result, UpdatedParty, UpdatedEnemy, Dmg, HitIdx} =
         combat:resolve_group(FullParty, EInfo),
-    case Result of
-        party_won ->
-            NewEHp = maps:get(hp, UpdatedEnemy),
-            if
-                NewEHp =< 0 ->
-                    XpGain = ELevel + 1,
-                    GoldGain = ELevel * 2 + rand:uniform(3),
-                    Leader0 = hd(UpdatedParty),
-                    Leader1 = Leader0#{exp := maps:get(exp, Leader0) + XpGain,
-                                       gold := maps:get(gold, Leader0, 0) + GoldGain},
-                    Leader2 = combat:check_level_up(Leader1),
-                    UpdatedMembers = [begin
-                        M1 = M#{exp := maps:get(exp, M) + XpGain},
-                        combat:check_level_up(M1)
-                    end || M <- tl(UpdatedParty)],
-                    Drop = combat:generate_drop(ELevel),
-                    {Leader3, DropLog} = apply_drop(Leader2, Drop),
-                    KillLog = [io_lib:format("~s's party slew ~s(Lv~p) [+~pXP +~pg]",
-                                             [LeaderName, EName, ELevel, XpGain, GoldGain])],
-                    schedule_respawn_enemy(EName, ELevel),
-                    NewLeader = Leader3#{party_members := UpdatedMembers},
-                    FollowerPids = maps:get(follower_pids, NewLeader, []),
-                    NewChars = update_follower_infos(FollowerPids, UpdatedMembers,
-                                                     AccChars#{CharPid := NewLeader}),
-                    {NewChars, maps:remove(EPid, AccEnemies),
-                     AccLog ++ KillLog ++ DropLog};
-                true ->
-                    Leader0 = hd(UpdatedParty),
-                    NewLeader = Leader0#{party_members := tl(UpdatedParty)},
-                    {AccChars#{CharPid := NewLeader},
-                     AccEnemies#{EPid := UpdatedEnemy},
-                     AccLog ++ [io_lib:format("~s's party hit ~s (-~pHP)",
-                                              [LeaderName, EName, Dmg])]}
-            end;
-        party_lost ->
-            HitMember = lists:nth(HitIdx, UpdatedParty),
-            HitName = maps:get(name, HitMember),
-            HitHp = maps:get(hp, HitMember),
-            if
-                HitHp =< 0 andalso HitIdx =:= 1 ->
-                    Race = maps:get(race, hd(FullParty), human),
-                    schedule_respawn_char(maps:get(name, hd(FullParty)), Race),
-                    NewChars = disband_party(hd(FullParty), maps:remove(CharPid, AccChars)),
-                    {NewChars, AccEnemies,
-                     AccLog ++ [io_lib:format("~s was slain by ~s! Party disbanded!", [HitName, EName])]};
-                HitHp =< 0 ->
-                    FollowerPids = maps:get(follower_pids, hd(UpdatedParty), []),
-                    DeadFPid = lists:nth(HitIdx - 1, FollowerPids),
-                    DeadFRace = maps:get(race, HitMember, human),
-                    schedule_respawn_char(HitName, DeadFRace),
-                    NewFollowerPids = lists:delete(DeadFPid, FollowerPids),
-                    NewMembers = lists:delete(HitMember, tl(UpdatedParty)),
-                    Leader0 = hd(UpdatedParty),
-                    NewRole = case NewMembers of [] -> solo; _ -> leader end,
-                    NewLeader = Leader0#{party_role := NewRole,
-                                         party_members := NewMembers,
-                                         follower_pids := NewFollowerPids},
-                    NewChars = maps:remove(DeadFPid, AccChars#{CharPid := NewLeader}),
-                    {NewChars, AccEnemies,
-                     AccLog ++ [io_lib:format("~s was slain by ~s!", [HitName, EName])]};
-                true ->
-                    Leader0 = hd(UpdatedParty),
-                    NewLeader = Leader0#{party_members := tl(UpdatedParty)},
-                    NewChars = case HitIdx > 1 of
-                        true ->
-                            FollowerPids = maps:get(follower_pids, NewLeader, []),
-                            update_follower_infos(FollowerPids, tl(UpdatedParty),
-                                                   AccChars#{CharPid := NewLeader});
-                        false ->
-                            AccChars#{CharPid := NewLeader}
-                    end,
-                    {NewChars, AccEnemies,
-                     AccLog ++ [io_lib:format("~s hit by ~s (-~pHP)", [HitName, EName, Dmg])]}
-            end
-    end.
+    group_outcome(Result, CharPid, FullParty, UpdatedParty, UpdatedEnemy, Dmg,
+                  HitIdx, EPid, EInfo, AccChars, AccEnemies, AccLog).
+
+group_outcome(party_won, CharPid, _FullParty, UpdatedParty, UpdatedEnemy, Dmg,
+              _HitIdx, EPid, EInfo, AccChars, AccEnemies, AccLog) ->
+    case maps:get(hp, UpdatedEnemy) =< 0 of
+        true ->
+            party_slays_enemy(CharPid, UpdatedParty, EPid, EInfo, AccChars, AccEnemies, AccLog);
+        false ->
+            party_hits_enemy(CharPid, UpdatedParty, UpdatedEnemy, Dmg, EPid, EInfo,
+                             AccChars, AccEnemies, AccLog)
+    end;
+group_outcome(party_lost, CharPid, FullParty, UpdatedParty, _UpdatedEnemy, Dmg,
+              HitIdx, _EPid, EInfo, AccChars, AccEnemies, AccLog) ->
+    HitMember = lists:nth(HitIdx, UpdatedParty),
+    member_hit_outcome(maps:get(hp, HitMember), HitIdx, CharPid, FullParty, UpdatedParty,
+                       HitMember, Dmg, EInfo, AccChars, AccEnemies, AccLog).
+
+party_slays_enemy(CharPid, UpdatedParty, EPid, EInfo, AccChars, AccEnemies, AccLog) ->
+    LeaderName = maps:get(name, hd(UpdatedParty)),
+    EName = maps:get(name, EInfo),
+    ELevel = maps:get(level, EInfo),
+    XpGain = ELevel + 1,
+    GoldGain = ELevel * 2 + rand:uniform(3),
+    Leader0 = hd(UpdatedParty),
+    Leader1 = Leader0#{exp := maps:get(exp, Leader0) + XpGain,
+                       gold := maps:get(gold, Leader0, 0) + GoldGain},
+    Leader2 = combat:check_level_up(Leader1),
+    UpdatedMembers = [begin
+        M1 = M#{exp := maps:get(exp, M) + XpGain},
+        combat:check_level_up(M1)
+    end || M <- tl(UpdatedParty)],
+    Drop = combat:generate_drop(ELevel),
+    {Leader3, DropLog} = apply_drop(Leader2, Drop),
+    KillLog = [io_lib:format("~s's party slew ~s(Lv~p) [+~pXP +~pg]",
+                             [LeaderName, EName, ELevel, XpGain, GoldGain])],
+    schedule_respawn_enemy(EName, ELevel),
+    NewLeader = Leader3#{party_members := UpdatedMembers},
+    FollowerPids = maps:get(follower_pids, NewLeader, []),
+    NewChars = update_follower_infos(FollowerPids, UpdatedMembers,
+                                     AccChars#{CharPid := NewLeader}),
+    {NewChars, maps:remove(EPid, AccEnemies),
+     AccLog ++ KillLog ++ DropLog}.
+
+party_hits_enemy(CharPid, UpdatedParty, UpdatedEnemy, Dmg, EPid, EInfo,
+                 AccChars, AccEnemies, AccLog) ->
+    LeaderName = maps:get(name, hd(UpdatedParty)),
+    EName = maps:get(name, EInfo),
+    Leader0 = hd(UpdatedParty),
+    NewLeader = Leader0#{party_members := tl(UpdatedParty)},
+    {AccChars#{CharPid := NewLeader},
+     AccEnemies#{EPid := UpdatedEnemy},
+     AccLog ++ [io_lib:format("~s's party hit ~s (-~pHP)", [LeaderName, EName, Dmg])]}.
+
+member_hit_outcome(Hp, 1, CharPid, FullParty, _UpdatedParty, HitMember, _Dmg,
+                   EInfo, AccChars, AccEnemies, AccLog) when Hp =< 0 ->
+    Race = maps:get(race, hd(FullParty), human),
+    schedule_respawn_char(maps:get(name, hd(FullParty)), Race),
+    NewChars = disband_party(hd(FullParty), maps:remove(CharPid, AccChars)),
+    {NewChars, AccEnemies,
+     AccLog ++ [io_lib:format("~s was slain by ~s! Party disbanded!",
+                              [maps:get(name, HitMember), maps:get(name, EInfo)])]};
+member_hit_outcome(Hp, HitIdx, CharPid, _FullParty, UpdatedParty, HitMember, _Dmg,
+                   EInfo, AccChars, AccEnemies, AccLog) when Hp =< 0 ->
+    HitName = maps:get(name, HitMember),
+    FollowerPids = maps:get(follower_pids, hd(UpdatedParty), []),
+    DeadFPid = lists:nth(HitIdx - 1, FollowerPids),
+    DeadFRace = maps:get(race, HitMember, human),
+    schedule_respawn_char(HitName, DeadFRace),
+    NewFollowerPids = lists:delete(DeadFPid, FollowerPids),
+    NewMembers = lists:delete(HitMember, tl(UpdatedParty)),
+    Leader0 = hd(UpdatedParty),
+    NewLeader = Leader0#{party_role := member_role(NewMembers),
+                         party_members := NewMembers,
+                         follower_pids := NewFollowerPids},
+    NewChars = maps:remove(DeadFPid, AccChars#{CharPid := NewLeader}),
+    {NewChars, AccEnemies,
+     AccLog ++ [io_lib:format("~s was slain by ~s!", [HitName, maps:get(name, EInfo)])]};
+member_hit_outcome(_Hp, HitIdx, CharPid, _FullParty, UpdatedParty, HitMember, Dmg,
+                   EInfo, AccChars, AccEnemies, AccLog) ->
+    Leader0 = hd(UpdatedParty),
+    NewLeader = Leader0#{party_members := tl(UpdatedParty)},
+    NewChars = sync_hit_member(HitIdx, NewLeader, tl(UpdatedParty), CharPid, AccChars),
+    {NewChars, AccEnemies,
+     AccLog ++ [io_lib:format("~s hit by ~s (-~pHP)",
+                              [maps:get(name, HitMember), maps:get(name, EInfo), Dmg])]}.
+
+member_role([]) -> solo;
+member_role(_Members) -> leader.
+
+sync_hit_member(1, NewLeader, _Members, CharPid, AccChars) ->
+    AccChars#{CharPid := NewLeader};
+sync_hit_member(_HitIdx, NewLeader, Members, CharPid, AccChars) ->
+    FollowerPids = maps:get(follower_pids, NewLeader, []),
+    update_follower_infos(FollowerPids, Members, AccChars#{CharPid := NewLeader}).
 
 update_follower_infos(FollowerPids, MemberInfos, Chars) ->
-    %% Update combat-relevant fields but preserve position from Chars map
     Pairs = safe_zip(FollowerPids, MemberInfos),
     lists:foldl(fun({FPid, CombatInfo}, AccChars) ->
         case maps:find(FPid, AccChars) of
             {ok, CurrentInfo} ->
-                %% Merge combat results (hp, exp, level, etc.) but keep current position
                 Merged = CombatInfo#{x := maps:get(x, CurrentInfo),
                                      y := maps:get(y, CurrentInfo)},
                 AccChars#{FPid := Merged};
-            error -> AccChars
+            error ->
+                AccChars
         end
     end, Chars, Pairs).
 
@@ -616,7 +626,6 @@ safe_zip([], _) -> [];
 safe_zip(_, []) -> [];
 safe_zip([H1 | T1], [H2 | T2]) -> [{H1, H2} | safe_zip(T1, T2)].
 
-%% Schedule respawns as delayed messages to self
 schedule_respawn_char(Name, Race) ->
     erlang:send_after(?RESPAWN_DELAY, self(), {respawn_char, Name, Race}).
 
@@ -624,75 +633,67 @@ schedule_respawn_enemy(Name, Level) ->
     erlang:send_after(?RESPAWN_DELAY, self(), {respawn_enemy, Name, Level}).
 
 check_pvp_collisions(Chars) ->
-    ByPos = maps:fold(fun(Pid, Info, Acc) ->
+    ByPos = group_by_position(Chars),
+    maps:fold(fun resolve_cell/3, {Chars, []}, ByPos).
+
+group_by_position(Chars) ->
+    maps:fold(fun(Pid, Info, Acc) ->
         case maps:get(party_role, Info, solo) of
-            follower -> Acc;
+            follower ->
+                Acc;
             _ ->
                 Pos = {maps:get(x, Info), maps:get(y, Info)},
-                Current = maps:get(Pos, Acc, []),
-                Acc#{Pos => [{Pid, Info} | Current]}
+                Acc#{Pos => [{Pid, Info} | maps:get(Pos, Acc, [])]}
         end
-    end, #{}, Chars),
-    maps:fold(fun(_Pos, Occupants, {AccChars, AccLog}) ->
-        case Occupants of
-            [_Single] -> {AccChars, AccLog};
-            [{Pid1, _}, {Pid2, _} | _] ->
-                case same_party(Pid1, Pid2, AccChars) of
-                    true -> {AccChars, AccLog};
-                    false ->
-                        case {maps:find(Pid1, AccChars), maps:find(Pid2, AccChars)} of
-                            {{ok, I1}, {ok, I2}} ->
-                                resolve_pvp(Pid1, I1, Pid2, I2, AccChars, AccLog);
-                            _ -> {AccChars, AccLog}
-                        end
-                end
-        end
-    end, {Chars, []}, ByPos).
+    end, #{}, Chars).
 
-same_party(Pid1, Pid2, Chars) ->
-    Check1 = case maps:find(Pid1, Chars) of
-        {ok, I1} -> lists:member(Pid2, maps:get(follower_pids, I1, []));
-        error -> false
-    end,
-    Check2 = case maps:find(Pid2, Chars) of
-        {ok, I2} -> lists:member(Pid1, maps:get(follower_pids, I2, []));
-        error -> false
-    end,
-    Check1 orelse Check2.
-
-resolve_pvp(Pid1, I1, Pid2, I2, AccChars, AccLog) ->
-    N1 = maps:get(name, I1),
-    N2 = maps:get(name, I2),
-    {Winner, _Loser, Dmg} = combat:resolve(I1, I2),
-    WinnerName = maps:get(name, Winner),
-    {WinnerPid, LoserPid, WinnerInfo, LoserInfo, WName, LName} =
-        case WinnerName =:= N1 of
-            true  -> {Pid1, Pid2, I1, I2, N1, N2};
-            false -> {Pid2, Pid1, I2, I1, N2, N1}
-        end,
-    NewLoserHp = maps:get(hp, LoserInfo) - Dmg,
-    if
-        NewLoserHp =< 0 ->
-            XpGain = maps:get(level, LoserInfo),
-            W1 = WinnerInfo#{exp := maps:get(exp, WinnerInfo) + XpGain},
-            W2 = combat:check_level_up(W1),
-            LvlLog = case maps:get(level, W2) > maps:get(level, WinnerInfo) of
-                true -> [io_lib:format("~s leveled up to Lv~p!", [WName, maps:get(level, W2)])];
-                false -> []
-            end,
-            LRace = maps:get(race, LoserInfo, human),
-            schedule_respawn_char(LName, LRace),
-            NewChars = disband_party(LoserInfo, maps:remove(LoserPid, AccChars#{WinnerPid := W2})),
-            {NewChars,
-             AccLog ++ [io_lib:format("~s defeated ~s! [+~pXP]", [WName, LName, XpGain])] ++ LvlLog};
+resolve_cell(_Pos, [_Single], Acc) ->
+    Acc;
+resolve_cell(_Pos, [{Pid1, _}, {Pid2, _} | _], {AccChars, AccLog}) ->
+    case same_party(Pid1, Pid2, AccChars) of
         true ->
-            {AccChars#{LoserPid := LoserInfo#{hp := NewLoserHp}},
-             AccLog ++ [io_lib:format("~s clashed with ~s (-~pHP)", [WName, LName, Dmg])]}
+            {AccChars, AccLog};
+        false ->
+            {{ok, I1}, {ok, I2}} = {maps:find(Pid1, AccChars), maps:find(Pid2, AccChars)},
+            resolve_pvp(Pid1, I1, Pid2, I2, AccChars, AccLog)
     end.
 
-%%%-------------------------------------------------------------------
-%%% Drop handling
-%%%-------------------------------------------------------------------
+same_party(Pid1, Pid2, Chars) ->
+    follows(Pid1, Pid2, Chars) orelse follows(Pid2, Pid1, Chars).
+
+follows(LeaderPid, MemberPid, Chars) ->
+    lists:member(MemberPid, maps:get(follower_pids, maps:get(LeaderPid, Chars), [])).
+
+resolve_pvp(Pid1, I1, Pid2, I2, AccChars, AccLog) ->
+    {Winner, _Loser, Dmg} = combat:resolve(I1, I2),
+    {WinnerPid, LoserPid, WinnerInfo, LoserInfo, WName, LName} =
+        pvp_roles(Pid1, I1, Pid2, I2, Winner),
+    pvp_outcome(maps:get(hp, LoserInfo) - Dmg, WinnerPid, LoserPid, WinnerInfo,
+                LoserInfo, WName, LName, Dmg, AccChars, AccLog).
+
+pvp_roles(Pid1, I1, Pid2, I2, Winner) ->
+    case maps:get(name, Winner) =:= maps:get(name, I1) of
+        true ->
+            {Pid1, Pid2, I1, I2, maps:get(name, I1), maps:get(name, I2)};
+        false ->
+            {Pid2, Pid1, I2, I1, maps:get(name, I2), maps:get(name, I1)}
+    end.
+
+pvp_outcome(NewLoserHp, WinnerPid, LoserPid, WinnerInfo, LoserInfo,
+            WName, LName, _Dmg, AccChars, AccLog) when NewLoserHp =< 0 ->
+    XpGain = maps:get(level, LoserInfo),
+    W1 = WinnerInfo#{exp := maps:get(exp, WinnerInfo) + XpGain},
+    W2 = combat:check_level_up(W1),
+    LvlLog = level_log(maps:get(level, WinnerInfo), maps:get(level, W2), WName),
+    LRace = maps:get(race, LoserInfo, human),
+    schedule_respawn_char(LName, LRace),
+    NewChars = disband_party(LoserInfo, maps:remove(LoserPid, AccChars#{WinnerPid := W2})),
+    {NewChars,
+     AccLog ++ [io_lib:format("~s defeated ~s! [+~pXP]", [WName, LName, XpGain])] ++ LvlLog};
+pvp_outcome(NewLoserHp, _WinnerPid, LoserPid, _WinnerInfo, LoserInfo,
+            WName, LName, Dmg, AccChars, AccLog) ->
+    {AccChars#{LoserPid := LoserInfo#{hp := NewLoserHp}},
+     AccLog ++ [io_lib:format("~s clashed with ~s (-~pHP)", [WName, LName, Dmg])]}.
 
 apply_drop(Char, nothing) -> {Char, []};
 apply_drop(Char, {ItemName, {hp_restore, Amount}}) ->

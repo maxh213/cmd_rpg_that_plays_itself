@@ -1,30 +1,32 @@
 -module(enemy).
--export([start/1]).
+-export([start/3, start/4]).
 
 -define(BASE_SPEED, 800).
 
-%% Each enemy is an autonomous process. Higher level enemies move slower.
-start(Level) ->
-    Speed = ?BASE_SPEED + Level * 50,
+start(Level, GetState, Move) ->
+    start(Level, ?BASE_SPEED + Level * 50, GetState, Move).
+
+start(_Level, Speed, GetState, Move) ->
     spawn(fun() ->
         timer:sleep(rand:uniform(Speed)),
-        loop(Speed)
+        loop(Speed, GetState, Move)
     end).
 
-loop(Speed) ->
-    case world_server:get_enemy_state(self()) of
+loop(Speed, GetState, Move) ->
+    case GetState(self()) of
         dead ->
             ok;
         undefined ->
             timer:sleep(100),
-            loop(Speed);
+            loop(Speed, GetState, Move);
         {ok, _Info} ->
-            %% 50% chance to stay put, 50% to wander
-            Direction = case rand:uniform(2) of
-                1 -> stay;
-                2 -> util:random_direction()
-            end,
-            world_server:move(self(), Direction),
+            Move(self(), wander_direction()),
             timer:sleep(Speed),
-            loop(Speed)
+            loop(Speed, GetState, Move)
+    end.
+
+wander_direction() ->
+    case rand:uniform(2) of
+        1 -> stay;
+        2 -> util:random_direction()
     end.
