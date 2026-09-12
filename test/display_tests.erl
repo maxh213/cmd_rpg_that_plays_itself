@@ -3,14 +3,33 @@
 
 -define(HIDE, "\e[?25l").
 -define(PARK, "\e[75;1H\e[?25h").
+-define(SCREEN_ROWS, 75).
+-define(GRID_TOP_ROW, 4).
+-define(GRID_LEFT_COL, 4).
 
-start_display(Timeout) ->
+-define(assertShows(Rows, Text), ?assertNotEqual(nomatch, string:find(Rows, Text))).
+-define(assertHides(Rows, Text), ?assertEqual(nomatch, string:find(Rows, Text))).
+
+capturing_io(Start) ->
     CapturePid = test_support:capture_io(),
     OldLeader = erlang:group_leader(),
     erlang:group_leader(CapturePid, self()),
-    DisplayPid = display:start(fake_world, Timeout),
+    DisplayPid = Start(),
     erlang:group_leader(OldLeader, self()),
     {CapturePid, DisplayPid}.
+
+start_display(Timeout) ->
+    capturing_io(fun() -> display:start(fake_world, Timeout) end).
+
+await_updates(CapturePid, Wanted) ->
+    test_support:eventually(
+        fun() -> length(updates(test_support:captured_text(CapturePid))) >= Wanted end, 200).
+
+stop_and_read(CapturePid, DisplayPid) ->
+    Text = test_support:captured_text(CapturePid),
+    test_support:kill(DisplayPid),
+    test_support:kill(CapturePid),
+    Text.
 
 world(Overrides) ->
     maps:merge(#{characters => #{}, enemies => #{}, shops => [], inns => [],
@@ -25,14 +44,9 @@ send_render(DisplayPid, World) ->
 run_frames(Worlds) ->
     {CapturePid, DisplayPid} = start_display(40),
     lists:foreach(fun(World) -> send_render(DisplayPid, World) end, Worlds),
-    Wanted = length(Worlds),
-    test_support:eventually(
-        fun() -> length(updates(test_support:captured_text(CapturePid))) >= Wanted end, 200),
+    await_updates(CapturePid, length(Worlds)),
     timer:sleep(60),
-    test_support:kill(DisplayPid),
-    Text = test_support:captured_text(CapturePid),
-    test_support:kill(CapturePid),
-    Text.
+    stop_and_read(CapturePid, DisplayPid).
 
 updates(Text) ->
     tl(string:split(Text, ?HIDE, all)).
@@ -109,16 +123,27 @@ cell_at(Screen, Row, Col) ->
     maps:get({Row, Col}, maps:get(cells, Screen), {"", $\s}).
 
 screen_rows(Screen) ->
-    [row_text(Screen, Row) || Row <- lists:seq(1, 75)].
+    [row_text(Screen, Row) || Row <- lists:seq(1, ?SCREEN_ROWS)].
 
 screen_text(Screen) ->
     string:join(screen_rows(Screen), "\n").
 
 row_holding(Screen, Needle) ->
-    [Row || Row <- lists:seq(1, 75), string:find(row_text(Screen, Row), Needle) =/= nomatch].
+    [Row || Row <- lists:seq(1, ?SCREEN_ROWS),
+            string:find(row_text(Screen, Row), Needle) =/= nomatch].
 
 grid_cell(Screen, X, Y) ->
-    cell_at(Screen, Y + 4, 4 + 2 * X).
+    cell_at(Screen, ?GRID_TOP_ROW + Y, ?GRID_LEFT_COL + 2 * X).
+
+grid_row("  |" ++ Rest) ->
+    length(Rest) > 0 andalso lists:last(Rest) =:= $|;
+grid_row(_) ->
+    false.
+
+border_row("  +" ++ Rest) ->
+    length(Rest) > 0 andalso lists:last(Rest) =:= $+;
+border_row(_) ->
+    false.
 
 rich_characters() ->
     LeaderPid = test_support:fake_pid(),
@@ -185,34 +210,24 @@ first_update_paints_the_whole_frame_test() ->
     Screen = screen_of(Text),
     Rows = screen_text(Screen),
     ?assertEqual([1], row_holding(Screen, "=== CMD RPG [7 moves] ===")),
-    ?assert(string:find(Rows, "@ Hero  & Party  ! Enemy  $ Shop  H Inn") =/= nomatch),
-    ?assert(string:find(Rows, "Heroes:") =/= nomatch),
-    ?assert(string:find(Rows, "--- Party: Aldric + Brom ---") =/= nomatch),
-    ?assert(string:find(Rows, "    & Aldric (Hum)") =/= nomatch),
-    ?assert(string:find(Rows, "      + Brom (Dwf)") =/= nomatch),
-    ?assert(string:find(Rows, "    @ Durnir (Trt)") =/= nomatch),
-    ?assert(string:find(Rows, "    @ Nyx (Hum)") =/= nomatch),
-    ?assertEqual(nomatch, string:find(Rows, "Cedric")),
-    ?assert(string:find(Rows, "+2ATK +3DEF") =/= nomatch),
-    ?assert(string:find(Rows, "+4DEF") =/= nomatch),
-    ?assert(string:find(Rows, "Enemies on map: 1") =/= nomatch),
-    ?assert(string:find(Rows, "ev04") =/= nomatch),
-    ?assertEqual(nomatch, string:find(Rows, "ev03")),
+    ?assertShows(Rows, "@ Hero  & Party  ! Enemy  $ Shop  H Inn"),
+    ?assertShows(Rows, "Heroes:"),
+    ?assertShows(Rows, "--- Party: Aldric + Brom ---"),
+    ?assertShows(Rows, "    & Aldric (Hum)"),
+    ?assertShows(Rows, "      + Brom (Dwf)"),
+    ?assertShows(Rows, "    @ Durnir (Trt)"),
+    ?assertShows(Rows, "    @ Nyx (Hum)"),
+    ?assertHides(Rows, "Cedric"),
+    ?assertShows(Rows, "+2ATK +3DEF"),
+    ?assertShows(Rows, "+4DEF"),
+    ?assertShows(Rows, "Enemies on map: 1"),
+    ?assertShows(Rows, "ev04"),
+    ?assertHides(Rows, "ev03"),
     GridRows = [Line || Line <- screen_rows(Screen), grid_row(Line)],
     ?assertEqual(40, length(GridRows)),
     lists:foreach(fun(Line) -> ?assertEqual(84, length(Line)) end, GridRows),
     ?assertEqual(2, length([Line || Line <- screen_rows(Screen), border_row(Line)])),
     ?assertEqual([3, 44], row_holding(Screen, "+---")).
-
-grid_row("  |" ++ Rest) ->
-    length(Rest) > 0 andalso lists:last(Rest) =:= $|;
-grid_row(_) ->
-    false.
-
-border_row("  +" ++ Rest) ->
-    length(Rest) > 0 andalso lists:last(Rest) =:= $+;
-border_row(_) ->
-    false.
 
 party_map_cell_is_single_glyph_test() ->
     Screen = screen_of(run_frames([world(#{characters => rich_characters(), moves => 3})])),
@@ -224,49 +239,38 @@ party_map_cell_is_single_glyph_test() ->
 empty_frame_shows_quiet_log_test() ->
     Screen = screen_of(run_frames([world(#{})])),
     Rows = screen_text(Screen),
-    ?assert(string:find(Rows, "=== CMD RPG [0 moves] ===") =/= nomatch),
-    ?assert(string:find(Rows, "Heroes:") =/= nomatch),
-    ?assert(string:find(Rows, "Enemies on map: 0") =/= nomatch),
-    ?assert(string:find(Rows, "> (quiet...)") =/= nomatch).
+    ?assertShows(Rows, "=== CMD RPG [0 moves] ==="),
+    ?assertShows(Rows, "Heroes:"),
+    ?assertShows(Rows, "Enemies on map: 0"),
+    ?assertShows(Rows, "> (quiet...)").
 
 short_log_shows_all_events_test() ->
     Screen = screen_of(run_frames([world(#{log => ["first", "second", "third"], moves => 1})])),
     Rows = screen_text(Screen),
-    ?assert(string:find(Rows, "> first") =/= nomatch),
-    ?assert(string:find(Rows, "> second") =/= nomatch),
-    ?assert(string:find(Rows, "> third") =/= nomatch),
-    ?assertEqual(nomatch, string:find(Rows, "(quiet...)")).
+    ?assertShows(Rows, "> first"),
+    ?assertShows(Rows, "> second"),
+    ?assertShows(Rows, "> third"),
+    ?assertHides(Rows, "(quiet...)").
 
 existing_entry_points_still_work_test() ->
-    CapturePid = test_support:capture_io(),
-    OldLeader = erlang:group_leader(),
-    erlang:group_leader(CapturePid, self()),
-    DisplayPid = display:start(self()),
-    erlang:group_leader(OldLeader, self()),
+    {CapturePid, DisplayPid} = capturing_io(fun() -> display:start(self()) end),
     ?assert(is_process_alive(DisplayPid)),
     DisplayPid ! {render, rich_characters(), goblins(4, 12), [], [], ["one"], 5},
-    test_support:eventually(
-        fun() -> length(updates(test_support:captured_text(CapturePid))) >= 1 end, 200),
-    Text = test_support:captured_text(CapturePid),
-    test_support:kill(DisplayPid),
-    test_support:kill(CapturePid),
-    Rows = screen_text(screen_of(Text)),
-    ?assert(string:find(Rows, "=== CMD RPG [5 moves] ===") =/= nomatch),
-    ?assert(string:find(Rows, "Enemies on map: 4") =/= nomatch),
-    ?assert(string:find(Rows, "> one") =/= nomatch).
+    await_updates(CapturePid, 1),
+    Rows = screen_text(screen_of(stop_and_read(CapturePid, DisplayPid))),
+    ?assertShows(Rows, "=== CMD RPG [5 moves] ==="),
+    ?assertShows(Rows, "Enemies on map: 4"),
+    ?assertShows(Rows, "> one").
 
 start_paints_nothing_before_the_first_render_test() ->
     {CapturePid, DisplayPid} = start_display(40),
     timer:sleep(120),
     ?assertEqual("", test_support:captured_text(CapturePid)),
     send_render(DisplayPid, world(#{moves => 2})),
-    test_support:eventually(
-        fun() -> length(updates(test_support:captured_text(CapturePid))) >= 1 end, 200),
-    Text = test_support:captured_text(CapturePid),
-    test_support:kill(DisplayPid),
-    test_support:kill(CapturePid),
+    await_updates(CapturePid, 1),
+    Text = stop_and_read(CapturePid, DisplayPid),
     ?assert(lists:prefix(?HIDE ++ "\e[1;1H", Text)),
-    ?assert(string:find(screen_text(screen_of(Text)), "=== CMD RPG [2 moves] ===") =/= nomatch).
+    ?assertShows(screen_text(screen_of(Text)), "=== CMD RPG [2 moves] ===").
 
 each_display_paints_its_own_first_frame_in_full_test() ->
     First = run_frames([world(#{moves => 1})]),
@@ -313,12 +317,12 @@ later_updates_repaint_only_what_changed_test() ->
     ?assertEqual(0, occurrences(Update, "\e[2J")),
     ?assertEqual(0, occurrences(Update, "\e[J")),
     ?assertEqual(0, length([Char || Char <- Update, lists:member(Char, "ABCD")])),
-    ?assert(string:find(Update, "\e[1;15H") =/= nomatch),
-    ?assert(string:find(Update, "two") =/= nomatch),
-    ?assertEqual(nomatch, string:find(Update, "Heroes:")),
-    ?assertEqual(nomatch, string:find(Update, "Hero  ")),
+    ?assertShows(Update, "\e[1;15H"),
+    ?assertShows(Update, "two"),
+    ?assertHides(Update, "Heroes:"),
+    ?assertHides(Update, "Hero  "),
     Screen = screen_of(Text),
-    ?assert(string:find(screen_text(Screen), "> three") =/= nomatch),
+    ?assertShows(screen_text(Screen), "> three"),
     ?assertEqual(["    > one", "    > two", "    > three"],
                  [row_text(Screen, Row) || Row <- row_holding(Screen, "> ")]).
 
@@ -387,8 +391,8 @@ assert_shrinking_log_leaves_no_stale_lines() ->
     Quiet = maps:merge(Busy, #{log => []}),
     Screen = screen_of(run_frames([Busy, Quiet])),
     Rows = screen_text(Screen),
-    ?assert(string:find(Rows, "> (quiet...)") =/= nomatch),
-    ?assertEqual(nomatch, string:find(Rows, "ev")),
+    ?assertShows(Rows, "> (quiet...)"),
+    ?assertHides(Rows, "ev"),
     [QuietRow] = row_holding(Screen, "(quiet...)"),
     ?assertEqual([], [Row || Row <- painted_rows(Screen), Row > QuietRow]).
 
@@ -400,7 +404,7 @@ assert_shrinking_roster_leaves_no_stale_lines() ->
     After = Before#{characters := maps:remove(Gone, Heroes)},
     Screen = screen_of(run_frames([Before, After])),
     Rows = screen_text(Screen),
-    ?assertEqual(nomatch, string:find(Rows, "Elara")),
+    ?assertHides(Rows, "Elara"),
     ?assertEqual(1, occurrences(Rows, "Enemies on map:")),
     ?assertEqual(1, occurrences(Rows, "> one")),
     [LastRow | _] = lists:reverse(painted_rows(Screen)),

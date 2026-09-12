@@ -253,19 +253,20 @@ class Game:
     def __init__(self, label):
         self.label = label
         self.frames = queue.Queue()
-        self.boot_text = ""
         self.proc = None
+        self.exit_reason = "game exited unexpectedly"
+        self._reset_stream()
+
+    def _reset_stream(self):
+        self.boot_text = ""
         self.seen_frame = False
         self.screen = Screen()
-        self.exit_reason = "game exited unexpectedly"
 
     def start(self):
         self.proc = subprocess.Popen(
             ["make", "run"], cwd=ROOT, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, bufsize=0)
-        self.boot_text = ""
-        self.seen_frame = False
-        self.screen = Screen()
+        self._reset_stream()
         threading.Thread(target=self._pump, daemon=True).start()
 
     def _pump(self):
@@ -315,15 +316,16 @@ class Game:
             item = self.frames.get(timeout=timeout)
         except queue.Empty:
             raise Failure(f"[{self.label}] no frame within {timeout:.0f}s")
-        if item is None:
-            raise Failure(f"[{self.label}] {self.exit_reason}")
-        return Frame(item, time.time())
+        return self._frame(item)
 
     def poll_frame(self):
         try:
             item = self.frames.get_nowait()
         except queue.Empty:
             return None
+        return self._frame(item)
+
+    def _frame(self, item):
         if item is None:
             raise Failure(f"[{self.label}] {self.exit_reason}")
         return Frame(item, time.time())

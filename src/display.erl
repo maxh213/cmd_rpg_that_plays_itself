@@ -15,7 +15,6 @@
 -define(BLUE,    "\e[34m").
 -define(MAGENTA, "\e[35m").
 -define(CYAN,    "\e[36m").
--define(WHITE,   "\e[37m").
 -define(DIM,     "\e[2m").
 
 -define(HIDE, "\e[?25l").
@@ -42,45 +41,43 @@ dirty_screen() ->
     lists:duplicate(?FRAME_ROWS, lists:duplicate(?FRAME_COLS, dirty)).
 
 update(Painted, Lines) ->
-    [?HIDE, frame_ops(Painted, Lines), addr(?PARK_ROW, 1), ?SHOW].
+    [?HIDE, row_updates(Painted, Lines), addr(?PARK_ROW, 1), ?SHOW].
 
-frame_ops(Painted, Lines) ->
+row_updates(Painted, Lines) ->
     Height = max(length(Painted), length(Lines)),
-    Rows = lists:zip3(lists:seq(1, Height), fill(Painted, Height, []), fill(Lines, Height, [])),
-    [line_ops(Row, Was, Now) || {Row, Was, Now} <- Rows].
+    Rows = lists:zip3(lists:seq(1, Height), pad(Painted, Height, []), pad(Lines, Height, [])),
+    [row_update(Row, Was, Now) || {Row, Was, Now} <- Rows].
 
-fill(Items, Length, Filler) ->
+pad(Items, Length, Filler) ->
     Items ++ lists:duplicate(Length - length(Items), Filler).
 
-line_ops(_Row, Same, Same) ->
+row_update(_Row, Same, Same) ->
     [];
-line_ops(Row, Was, Now) ->
-    Width = max(length(Was), length(Now)),
-    Cols = lists:zip3(lists:seq(1, Width), fill(Was, Width, blank), fill(Now, Width, blank)),
-    [[paint(Row, Col, Cells) || {Col, Cells} <- runs(Cols)],
-     clear_tail(Row, length(Was), length(Now))].
+row_update(Row, Was, Now) ->
+    Width = length(Now),
+    Columns = lists:zip3(lists:seq(1, Width), on_screen(Was, Width), Now),
+    [[paint_run(Row, Col, Cells) || {Col, Cells} <- changed_runs(Columns)],
+     clear_tail(Row, length(Was), Width)].
 
-runs([]) ->
+on_screen(Was, Width) ->
+    pad(lists:sublist(Was, Width), Width, blank).
+
+changed_runs([]) ->
     [];
-runs([{_Col, Same, Same} | Rest]) ->
-    runs(Rest);
-runs([{Col, _Was, Now} | Rest]) ->
-    {Cells, Tail} = run_cells(Rest, [Now]),
-    [{Col, Cells} | runs(Tail)].
+changed_runs([{_Col, Same, Same} | Rest]) ->
+    changed_runs(Rest);
+changed_runs([{Col, _Was, Now} | Rest]) ->
+    {Cells, Tail} = run_from(Rest, [Now]),
+    [{Col, Cells} | changed_runs(Tail)].
 
-run_cells([{_Col, Same, Same} | _] = Tail, Acc) ->
+run_from([{_Col, Same, Same} | _] = Tail, Acc) ->
     {lists:reverse(Acc), Tail};
-run_cells([], Acc) ->
+run_from([], Acc) ->
     {lists:reverse(Acc), []};
-run_cells([{_Col, _Was, Now} | Rest], Acc) ->
-    run_cells(Rest, [Now | Acc]).
+run_from([{_Col, _Was, Now} | Rest], Acc) ->
+    run_from(Rest, [Now | Acc]).
 
-paint(Row, Col, Cells) ->
-    painted(Row, Col, [Cell || Cell <- Cells, Cell =/= blank]).
-
-painted(_Row, _Col, []) ->
-    [];
-painted(Row, Col, Cells) ->
+paint_run(Row, Col, Cells) ->
     [addr(Row, Col), cell_bytes(Cells, none), ?RESET].
 
 cell_bytes([], _Style) ->
