@@ -1,0 +1,14 @@
+[git]
+base = "origin/master"
+
+[agent]
+backend = "kimi"
+
+[erlang]
+root = "."
+crap_max = 4
+sources = ["src"]
+test_dirs = ["test", "tests"]
+
+[comments]
+paths = ["src"]

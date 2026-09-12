@@ -4,3 +4,23 @@ ebin/
 _build/
 *.beam
 *.dump
+
+# marestail
+.marestail/
+mutants/
+.scannerwork/
+.venv/
+.coverage
+reports/mutation/
+.stryker-tmp/
+StrykerOutput/
+.sonarqube/
+.idea/
+.vscode/
+features/
+qa/
+tasks/
+.claude/settings.json
+.agents/hooks.json
+.grok/
+.cursor/hooks.json
