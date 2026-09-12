@@ -670,9 +670,10 @@ class Engine:
     def feed(self, frame):
         if "+" in frame.cells.values():
             raise Failure(f"[{self.label}] a + glyph appeared on the map")
-        self._population(frame, frame.enemies, 12, "enemies")
-        self._population(frame, len(frame.roster), 6, "heroes")
         events = frame.events()
+        kinds = {kind for kind, _groups in events}
+        self._population(frame, frame.enemies, 12, "enemies", "appeared" in kinds)
+        self._population(frame, len(frame.roster), 6, "heroes", "respawned" in kinds)
         for kind, groups in events:
             handler = getattr(self, f"on_{kind}", None)
             if handler:
@@ -701,7 +702,7 @@ class Engine:
             if any(a.gold < 10 <= b.gold for a in afters for b in befores):
                 self.flags.add("gold_narrowed")
 
-    def _population(self, frame, count, full, label):
+    def _population(self, frame, count, full, label, arrived):
         floor_attr, at_attr = f"floor_{label}", f"floor_{label}_at"
         if count > full:
             raise Failure(f"[{self.label}] {label} count above {full}: {count}")
@@ -709,7 +710,7 @@ class Engine:
             setattr(self, floor_attr, None)
             return
         lowest = getattr(self, floor_attr)
-        if lowest is None or count != lowest:
+        if lowest is None or count != lowest or arrived:
             setattr(self, floor_attr, count)
             setattr(self, at_attr, frame.at)
         elif frame.at - getattr(self, at_attr) > 10:
@@ -920,13 +921,14 @@ def report_rendering(gen_no, pairs):
 
 
 class PtyGame:
-    def __init__(self, cols, rows):
+    def __init__(self, cols, rows, label="pty", command=("make", "-s", "run")):
+        self.label = label
         self.master, slave = pty.openpty()
         self.data = b""
-        self.seen = 0
+        self.updates = queue.Queue()
         self.lock = threading.Lock()
         self._size(cols, rows)
-        self.proc = subprocess.Popen(["make", "-s", "run"], cwd=ROOT, stdin=slave, stdout=slave,
+        self.proc = subprocess.Popen(list(command), cwd=ROOT, stdin=slave, stdout=slave,
                                      stderr=slave, start_new_session=True)
         os.close(slave)
         threading.Thread(target=self._pump, daemon=True).start()
@@ -935,52 +937,77 @@ class PtyGame:
         fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
     def _pump(self):
+        buffer = b""
         while True:
             try:
                 chunk = os.read(self.master, 65536)
             except OSError:
-                return
+                chunk = b""
             if not chunk:
+                self.updates.put(None)
                 return
             with self.lock:
                 self.data += chunk
+            buffer += chunk
+            while True:
+                start = buffer.find(FRAME_START)
+                end = buffer.find(CURSOR_SHOW, start)
+                if start < 0 or end < 0:
+                    break
+                self.updates.put(buffer[start + len(FRAME_START):end + len(CURSOR_SHOW)])
+                buffer = buffer[end + len(CURSOR_SHOW):]
 
     def resize(self, cols, rows):
         self._size(cols, rows)
         os.killpg(self.proc.pid, signal.SIGWINCH)
 
     def next_update(self, timeout):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            with self.lock:
-                pieces = self.data.split(FRAME_START)[1:]
-            complete = [piece for piece in pieces if piece.endswith(CURSOR_SHOW)]
-            if len(complete) > self.seen:
-                self.seen += 1
-                return complete[self.seen - 1]
-            time.sleep(0.02)
-        raise Failure(f"[pty] no update within {timeout}s")
+        try:
+            update = self.updates.get(timeout=max(0.05, timeout))
+        except queue.Empty:
+            raise Failure(f"[{self.label}] no update within {timeout:.1f}s")
+        if update is None:
+            raise Failure(f"[{self.label}] the game exited")
+        return update
+
+    def paint(self, screen, update, cols, rows):
+        park = PARK_RE.search(update)
+        if not park:
+            raise Failure(f"[{self.label}] an update did not end with a park: {update[-40:]!r}")
+        body = update[:park.start()].decode("utf-8", "replace")
+        full_repaint = body.startswith(CLEAR)
+        if full_repaint:
+            screen.size = (cols, rows)
+        if int(park.group(1)) != screen.size[1]:
+            raise Failure(f"[{self.label}] an update parked on row {park.group(1)}, not {screen.size[1]}")
+        if len(CLEAR_SCREEN.findall(update)) != int(full_repaint):
+            raise Failure(f"[{self.label}] an update cleared the screen other than at its start")
+        screen.apply(body)
+        return full_repaint
 
     def await_repaint(self, screen, cols, rows, timeout):
         deadline = time.time() + timeout
         while True:
-            update = self.next_update(max(0.1, deadline - time.time()))
-            park = PARK_RE.search(update)
-            if not park:
-                raise Failure(f"[pty] an update did not end with a park: {update[-40:]!r}")
-            body = update[:park.start()].decode("utf-8", "replace")
-            full_repaint = body.startswith(CLEAR)
-            if full_repaint:
-                screen.size = (cols, rows)
-            if int(park.group(1)) != screen.size[1]:
-                raise Failure(f"[pty] an update parked on row {park.group(1)}, not {screen.size[1]}")
-            if len(CLEAR_SCREEN.findall(update)) != int(full_repaint):
-                raise Failure("[pty] an update cleared the screen other than at its start")
-            screen.apply(body)
-            if full_repaint:
+            if self.paint(screen, self.next_update(deadline - time.time()), cols, rows):
                 return screen.picture()
             if time.time() > deadline:
-                raise Failure(f"[pty] no full repaint at {cols}x{rows} within {timeout}s")
+                raise Failure(f"[{self.label}] no full repaint at {cols}x{rows} within {timeout}s")
+
+    def tick(self, screen):
+        cols, rows = screen.size
+        if self.paint(screen, self.next_update(RESIZE_SECONDS), cols, rows):
+            raise Failure(f"[{self.label}] a tick at an unchanged {cols}x{rows} repainted in full")
+        return screen.picture()
+
+    def check_wire(self, clears, parks):
+        with self.lock:
+            data = self.data
+        found = len(re.findall(rb"\x1b\[2J", data))
+        if found != clears:
+            raise Failure(f"[{self.label}] the wire holds {found} clear-screens, not {clears}")
+        rows = {int(row) for row in re.findall(rb"\x1b\[(\d+);1H\x1b\[\?25h", data)}
+        if rows != parks:
+            raise Failure(f"[{self.label}] the wire parks on rows {sorted(rows)}, not {sorted(parks)}")
 
     def stop(self):
         try:
@@ -997,22 +1024,37 @@ def expect_line(picture, row, check, what):
                       + picture.text())
 
 
-def check_80x24(picture):
-    expect_line(picture, 1, lambda l: HEADER_RE.fullmatch(l), "the header")
-    for row in (2, 9):
-        expect_line(picture, row, lambda l: l == "  +-------------+", "a 17-column border")
-    for row in range(3, 9):
-        expect_line(picture, row, lambda l: re.fullmatch(r"  \|(?:[.@!$H&+] ){6}\|", l),
-                    "a 6-cell grid row")
-    expect_line(picture, 10, lambda l: l == "  " + LEGEND, "the legend")
-    expect_line(picture, 11, lambda l: l == "  Heroes:", "Heroes:")
-    names = {m.group(3) for m in (HERO_RE.match(picture.line(r)) for r in range(12, 21)) if m}
-    if len(names) != 6:
-        raise Failure(f"[pty] the 80x24 roster lists {sorted(names)}, not 6 heroes\n" + picture.text())
-    log_row = picture.lines.index("  Log:") + 1
-    expect_line(picture, log_row - 1, lambda l: ENEMIES_RE.match(l), "the enemy count")
-    expect_line(picture, log_row + 1, lambda l: LOG_RE.match(l), "a log line")
-    expect_line(picture, 24, lambda l: l == "", "the empty park row")
+def check_fit(picture, cols, rows, side):
+    border = "  +" + "-" * (2 * side + 1) + "+"
+    grid_row = re.compile(r"  \|(?:[.@!$H&+] ){%d}\|" % side)
+    expect_line(picture, 1, HEADER_RE.fullmatch, "the header")
+    for row in (2, side + 3):
+        expect_line(picture, row, lambda l: l == border, f"a {len(border)}-column border")
+    for row in range(3, side + 3):
+        expect_line(picture, row, grid_row.fullmatch, f"a {side}-cell grid row")
+    expect_line(picture, side + 4, lambda l: l == ("  " + LEGEND)[:cols], "the legend")
+    expect_line(picture, side + 5, lambda l: l == "  Heroes:", "Heroes:")
+    row, names = side + 6, []
+    while not ENEMIES_RE.match(picture.line(row)):
+        hero = HERO_RE.match(picture.line(row))
+        if row >= rows or not (hero or PARTY_RE.match(picture.line(row))):
+            expect_line(picture, row, lambda l: False, "a roster line or the enemy count")
+        if hero:
+            names.append(hero.group(3))
+        row += 1
+    log_row = row + 1
+    expect_line(picture, log_row, lambda l: l == "  Log:", "Log:")
+    last = log_row
+    while last + 1 < rows and LOG_RE.match(picture.line(last + 1)):
+        last += 1
+    room = min(12, rows - 1 - log_row)
+    if not 1 <= last - log_row <= room:
+        raise Failure(f"[pty] {last - log_row} log lines at {cols}x{rows}, room for {room}\n"
+                      + picture.text())
+    for below in range(last + 1, rows + 1):
+        expect_line(picture, below, lambda l: l == "", "empty below the log")
+    return {"moves": int(HEADER_RE.fullmatch(picture.line(1)).group(1)), "names": sorted(names),
+            "roster": row - side - 6, "log": last - log_row, "room": room}
 
 
 def check_notice(picture):
@@ -1037,24 +1079,93 @@ def check_terminal_sizes():
     game = PtyGame(80, 24)
     try:
         screen = Screen(80, 24)
-        check_80x24(game.await_repaint(screen, 80, 24, 25))
+        first = game.next_update(25)
+        if not first.startswith(CLEAR.encode()):
+            raise Failure(f"[pty] the first update does not open with a clear: {first[:40]!r}")
+        game.paint(screen, first, 80, 24)
+        noted = check_fit(screen.picture(), 80, 24, 6)
         game.resize(85, 75)
-        ScreenCheck(game.await_repaint(screen, 85, 75, RESIZE_SECONDS)).run()
+        picture = game.await_repaint(screen, 85, 75, RESIZE_SECONDS)
+        ScreenCheck(picture).run()
+        check_fit(picture, 85, 75, 40)
+        check_fit(game.tick(screen), 85, 75, 40)
+        game.resize(120, 40)
+        check_fit(game.await_repaint(screen, 120, 40, RESIZE_SECONDS), 120, 40, 20)
         game.resize(19, 24)
         check_notice(game.await_repaint(screen, 19, 24, RESIZE_SECONDS))
         for _ in range(2):
             quiet = game.next_update(RESIZE_SECONDS)
             if quiet != b"\x1b[24;1H\x1b[?25h":
                 raise Failure(f"[pty] a too-small tick wrote more than the park: {quiet!r}")
+        game.resize(80, 9)
+        check_notice(game.await_repaint(screen, 80, 9, RESIZE_SECONDS))
         game.resize(20, 10)
         check_20x10(game.await_repaint(screen, 20, 10, RESIZE_SECONDS))
         game.resize(80, 24)
-        check_80x24(game.await_repaint(screen, 80, 24, RESIZE_SECONDS))
+        back = check_fit(game.await_repaint(screen, 80, 24, RESIZE_SECONDS), 80, 24, 6)
+        if back["moves"] <= noted["moves"]:
+            raise Failure(f"[pty] the move counter went from {noted['moves']} to {back['moves']}")
+        for _ in range(30):
+            if back["names"] == noted["names"]:
+                break
+            back = check_fit(game.tick(screen), 80, 24, 6)
+        if back["names"] != noted["names"]:
+            raise Failure(f"[pty] the roster lists {sorted(back['names'])}, not {sorted(noted['names'])}")
+        check_fit(game.tick(screen), 80, 24, 6)
+        game.check_wire(clears=7, parks={24, 75, 40, 9, 10})
     finally:
         game.stop()
-    print("terminal sizes ok in a pty: 80x24 shows every section, resizes to 85x75, 19x24, "
-          "20x10 and back repaint in full within one tick, the too-small notice ticks only "
-          "park, and nothing is drawn outside the terminal", flush=True)
+    print("terminal sizes ok in a pty: 80x24 shows every section, resizes to 85x75, 120x40, "
+          "19x24, 80x9, 20x10 and back repaint in full within one tick with 7 clear-screens "
+          "in all, the too-small notice ticks only park, the counter keeps climbing with the "
+          "same 6 heroes, and nothing is drawn outside the terminal", flush=True)
+
+
+LOG_ROOM_EVENTS = 12
+LOG_ROOM_STAGES = [("6 solo heroes", 6, 4), ("a party of two", 7, 3), ("three parties", 9, 1)]
+LOG_ROOM_SCRIPT = """
+Hero = fun(K, Role, Fs) -> {K, #{name => lists:nth(K, ["Aldric", "Brom", "Cogsworth", "Dagna",
+    "Elara", "Fenwick"]), race => human, level => 1, hp => 23, max_hp => 23, exp => 0,
+    gold => 0, attack_bonus => 0, defense_bonus => 0, party_role => Role,
+    follower_pids => Fs, x => K, y => K}} end,
+Roster = fun(Leaders) -> maps:from_list([case {lists:member(K, Leaders), lists:member(K - 1, Leaders)} of
+    {true, _} -> Hero(K, leader, [K + 1]); {_, true} -> Hero(K, follower, []);
+    _ -> Hero(K, solo, []) end || K <- lists:seq(1, 6)]) end,
+Log = [lists:flatten(io_lib:format("Aldric rests at the inn (+~pHP)", [N])) || N <- lists:seq(1, %d)],
+Enemies = maps:from_list([{N, #{x => 20, y => N}} || N <- lists:seq(1, 12)]),
+D = display:start(self()),
+[begin D ! {render, Roster(Leaders), Enemies, [#{x => 30, y => 30}], [#{x => 35, y => 35}], Log, Move},
+    timer:sleep(600) end || {Move, Leaders} <- [{1, []}, {2, []}, {3, [1]}, {4, [1]}, {5, [1, 3, 5]},
+    {6, [1, 3, 5]}]],
+halt().
+""" % LOG_ROOM_EVENTS
+
+
+def check_log_room():
+    subprocess.run(["make", "-s"], cwd=ROOT, check=True)
+    game = PtyGame(80, 24, "pty-log", ("erl", "-pa", "ebin", "-noshell", "-eval", LOG_ROOM_SCRIPT))
+    try:
+        screen = Screen(80, 24)
+        game.await_repaint(screen, 80, 24, 25)
+        for label, roster, shown in LOG_ROOM_STAGES:
+            fit = check_fit(game.tick(screen), 80, 24, 6)
+            for _ in range(2):
+                if fit["roster"] == roster:
+                    break
+                fit = check_fit(game.tick(screen), 80, 24, 6)
+            picture = screen.picture()
+            expected = [f"    > Aldric rests at the inn (+{n}HP)"
+                        for n in range(LOG_ROOM_EVENTS - shown + 1, LOG_ROOM_EVENTS + 1)]
+            log_row = picture.lines.index("  Log:") + 1
+            if (fit["roster"], len(fit["names"]), picture.lines[log_row:23]) != (roster, 6, expected):
+                raise Failure(f"[pty-log] with {label} at 80x24 the roster should be {roster} lines "
+                              f"with 6 heroes and the log the last {shown} events ending on row 23\n"
+                              + picture.text())
+    finally:
+        game.stop()
+    print("80x24 log ok in a pty: of 12 events the last 4 show beside 6 solo heroes, the last 3 "
+          "beside a party and the last 1 beside three parties, ending on row 23 with every hero "
+          "listed and no leftover text", flush=True)
 
 
 def run_gate_step():
@@ -1127,6 +1238,7 @@ def watch_events(gen_no, pairs, shared, deadline):
 
 def main():
     check_terminal_sizes()
+    check_log_room()
     shared = set()
     deadline = time.time() + EVENT_BUDGET
     for gen_no in range(1, GENERATIONS + 1):
