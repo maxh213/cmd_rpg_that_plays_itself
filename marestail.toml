@@ -12,3 +12,6 @@ test_dirs = ["test", "tests"]
 
 [comments]
 paths = ["src"]
+
+[qa]
+cmd = "make qa"
