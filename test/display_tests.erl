@@ -63,6 +63,13 @@ new_screen() ->
 screen_of(Text) ->
     paint_stream(Text, new_screen()).
 
+used_screen() ->
+    Filled = paint_stream(lists:flatten([["\e[", integer_to_list(Row), ";1H", lists:duplicate(85, $#)]
+                                         || Row <- lists:seq(1, 74)]), new_screen()),
+    Boot = "\e[1;1HStarting CMD RPG...\e[2;1HWorld is alive. Watch the heroes fight!"
+           "\e[3;1HPress Ctrl+C to stop.\e[5;1H",
+    paint_stream(Boot, Filled).
+
 paint_stream([], Screen) ->
     Screen;
 paint_stream([$\e, $[ | Rest], Screen) ->
@@ -229,6 +236,14 @@ first_update_paints_the_whole_frame_test() ->
     ?assertEqual(2, length([Line || Line <- screen_rows(Screen), border_row(Line)])),
     ?assertEqual([3, 44], row_holding(Screen, "+---")).
 
+first_update_erases_everything_the_terminal_already_showed_test() ->
+    Text = run_frames([world(#{log => ["one"]})]),
+    Clean = screen_of(Text),
+    Used = paint_stream(Text, used_screen()),
+    ?assertHides(screen_text(Used), "Watch the heroes fight!"),
+    ?assertHides(screen_text(Used), "#"),
+    ?assertEqual(maps:get(cells, Clean), maps:get(cells, Used)).
+
 party_map_cell_is_single_glyph_test() ->
     Screen = screen_of(run_frames([world(#{characters => rich_characters(), moves => 3})])),
     Grid = string:join([Line || Line <- screen_rows(Screen), grid_row(Line)], "\n"),
@@ -358,7 +373,21 @@ colours_survive_a_differential_repaint_test() ->
     ?assertEqual("\e[2m\e[31m", style_at(Screen, EnemyRow, 3)),
     [LogRow] = row_holding(Screen, "Log:"),
     ?assertEqual("\e[1m\e[33m", style_at(Screen, LogRow, 3)),
+    ?assertEqual(["\e[2m", "\e[2m"],
+                 [style_at(Screen, Row, 3) || Row <- row_holding(Screen, "+---")]),
     assert_hp_colours(Screen).
+
+hp_colour_changes_exactly_at_a_third_and_two_thirds_test() ->
+    Heroes = maps:from_list([{test_support:fake_pid(), solo_hero(Name, #{hp => Hp, max_hp => 30})}
+                             || {Name, Hp} <- [{"Third", 10}, {"Twothirds", 20}, {"Under", 9}]]),
+    Screen = screen_of(run_frames([world(#{characters => Heroes})])),
+    ?assertEqual("\e[33m", hp_style(Screen, "Third (")),
+    ?assertEqual("\e[32m", hp_style(Screen, "Twothirds (")),
+    ?assertEqual("\e[31m", hp_style(Screen, "Under (")).
+
+hp_style(Screen, Name) ->
+    [Row] = row_holding(Screen, Name),
+    style_at(Screen, Row, hp_column(Screen, Row)).
 
 assert_hp_colours(Screen) ->
     [Healthy] = row_holding(Screen, "Nyx ("),
