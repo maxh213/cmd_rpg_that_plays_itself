@@ -228,7 +228,8 @@ first_update_paints_the_whole_frame_test() ->
     ?assertShows(Rows, "+2ATK +3DEF"),
     ?assertShows(Rows, "+4DEF"),
     ?assertShows(Rows, "Enemies on map: 1"),
-    ?assertShows(Rows, "ev04"),
+    ?assertEqual([lists:flatten(io_lib:format("    > ev~2..0b", [N])) || N <- lists:seq(4, 15)],
+                 [row_text(Screen, Row) || Row <- row_holding(Screen, "> ")]),
     ?assertHides(Rows, "ev03"),
     GridRows = [Line || Line <- screen_rows(Screen), grid_row(Line)],
     ?assertEqual(40, length(GridRows)),
@@ -339,7 +340,16 @@ later_updates_repaint_only_what_changed_test() ->
     Screen = screen_of(Text),
     ?assertShows(screen_text(Screen), "> three"),
     ?assertEqual(["    > one", "    > two", "    > three"],
-                 [row_text(Screen, Row) || Row <- row_holding(Screen, "> ")]).
+                 [row_text(Screen, Row) || Row <- row_holding(Screen, "> ")]),
+    assert_far_apart_changes_repaint_only_their_cells().
+
+assert_far_apart_changes_repaint_only_their_cells() ->
+    Shops = world(#{shops => [#{name => "West", x => 0, y => 20}, #{name => "East", x => 39, y => 20}],
+                    moves => 4}),
+    Inns = maps:merge(Shops, #{shops => [], inns => maps:get(shops, Shops)}),
+    Blue = "\e[0m\e[1m\e[34mH \e[0m",
+    ?assertEqual("\e[24;4H" ++ Blue ++ "\e[24;82H" ++ Blue ++ ?PARK,
+                 lists:flatten(last_update(run_frames([Shops, Inns])))).
 
 the_screen_matches_a_full_repaint_of_the_same_world_test() ->
     Steps = [world(#{characters => rich_characters(), enemies => goblins(10, 30),
@@ -402,13 +412,14 @@ styled_worlds() ->
     FollowerPid = test_support:fake_pid(),
     Heroes = #{
         LeaderPid => solo_hero("Aldric", #{level => 5, hp => 40, max_hp => 40, gold => 12,
+                                           attack_bonus => 2, defense_bonus => 3,
                                            x => 1, y => 1, party_role => leader,
                                            follower_pids => [FollowerPid]}),
         FollowerPid => solo_hero("Brom", #{race => dwarf, level => 3, hp => 9, max_hp => 20,
                                            gold => 3, x => 11, y => 1,
                                            party_role => follower}),
-        test_support:fake_pid() => solo_hero("Elara", #{hp => 19, max_hp => 20, gold => 7,
-                                                        x => 3, y => 1})},
+        test_support:fake_pid() => solo_hero("Elara", #{level => 2, hp => 19, max_hp => 20,
+                                                        gold => 7, x => 3, y => 1})},
     Quiet = world(#{characters => Heroes,
                     enemies => #{test_support:fake_pid() =>
                                      test_support:enemy_info(#{x => 5, y => 1})},
@@ -432,11 +443,12 @@ styled_table() ->
      {47, [{"", "  "}, {"\e[1m\e[36m", "Heroes:"}]},
      {48, [{"", "  "}, {"\e[1m\e[36m", "--- Party: Aldric + Brom ---"}]},
      {49, [{"", "    "}, {"\e[36m", "& "}, {"\e[1m", "Aldric"}, {"", " (Hum) Lv5  "},
-           {"\e[32m", "HP:40/40"}, {"", "  XP:0/11  "}, {"\e[33m", "12g"}]},
+           {"\e[32m", "HP:40/40"}, {"", "  XP:0/11  "}, {"\e[33m", "12g"},
+           {"", " +2ATK +3DEF"}]},
      {50, [{"", "      "}, {Dim, "+ "}, {"\e[1m", "Brom"}, {"", " (Dwf) Lv3  "},
            {"\e[33m", "HP:9/20"}, {"", "  XP:0/7  "}, {"\e[33m", "3g"}]},
-     {52, [{"", "    "}, {"\e[32m", "@ "}, {"\e[1m", "Elara"}, {"", " (Hum) Lv1  "},
-           {"\e[32m", "HP:19/20"}, {"", "  XP:0/3  "}, {"\e[33m", "7g"}]},
+     {52, [{"", "    "}, {"\e[32m", "@ "}, {"\e[1m", "Elara"}, {"", " (Hum) Lv2  "},
+           {"\e[32m", "HP:19/20"}, {"", "  XP:0/5  "}, {"\e[33m", "7g"}]},
      {53, [{"", "  "}, {"\e[2m\e[31m", "Enemies on map: 1"}]},
      {55, [{"", "  "}, {"\e[1m\e[33m", "Log:"}]}].
 
