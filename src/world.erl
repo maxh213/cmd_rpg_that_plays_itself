@@ -615,12 +615,11 @@ share_spoils([Leader0 | Members], XpGain, GoldGain, ELevel) ->
 
 -spec party_hits_enemy(pid(), [character(), ...], {enemy(), pos_integer()}, enemy_ref(),
                         fight()) -> fight().
-party_hits_enemy(CharPid, UpdatedParty, {UpdatedEnemy, Dmg}, {EPid, EInfo},
+party_hits_enemy(CharPid, [Leader0 | Members], {UpdatedEnemy, Dmg}, {EPid, EInfo},
                     {AccChars, AccEnemies, AccLog, AccFx}) ->
-    LeaderName = maps:get(name, hd(UpdatedParty)),
+    LeaderName = maps:get(name, Leader0),
     EName = maps:get(name, EInfo),
-    Leader0 = hd(UpdatedParty),
-    NewLeader = Leader0#{party_members := tl(UpdatedParty)},
+    NewLeader = Leader0#{party_members := Members},
     {AccChars#{CharPid := NewLeader},
         AccEnemies#{EPid := UpdatedEnemy},
         AccLog ++ [io_lib:format("~s's party hit ~s (-~pHP)", [LeaderName, EName, Dmg])],
@@ -652,11 +651,10 @@ member_hit_outcome(Hp, {HitIdx, HitMember, _Dmg}, CharPid, {_FullParty, UpdatedP
     {NewChars, AccEnemies,
         AccLog ++ [io_lib:format("~s was slain by ~s!", [HitName, maps:get(name, EInfo)])],
         AccFx ++ [{respawn_char, HitName, DeadFRace}]};
-member_hit_outcome(_Hp, {HitIdx, HitMember, Dmg}, CharPid, {_FullParty, UpdatedParty},
+member_hit_outcome(_Hp, {HitIdx, HitMember, Dmg}, CharPid, {_FullParty, [Leader0 | Members]},
                     EInfo, {AccChars, AccEnemies, AccLog, AccFx}) ->
-    Leader0 = hd(UpdatedParty),
-    NewLeader = Leader0#{party_members := tl(UpdatedParty)},
-    NewChars = sync_hit_member(HitIdx, NewLeader, tl(UpdatedParty), CharPid, AccChars),
+    NewLeader = Leader0#{party_members := Members},
+    NewChars = sync_hit_member(HitIdx, NewLeader, Members, CharPid, AccChars),
     {NewChars, AccEnemies,
         AccLog ++ [io_lib:format("~s hit by ~s (-~pHP)",
             [maps:get(name, HitMember), maps:get(name, EInfo), Dmg])],
