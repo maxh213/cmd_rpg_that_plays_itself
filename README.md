@@ -18,13 +18,14 @@ rpg_app (entry point)
      -> character processes (spawned per hero, AI movement loop)
      -> enemy processes (spawned per mob, random wandering)
      -> display process (builds each frame as styled lines of the world)
-        -> screen (the only module that speaks ANSI: clips the frame to 85x74,
-           diffs it against the last one, repaints just the changed runs)
+        -> screen (the only module that speaks ANSI: clips the frame to the
+           terminal, repaints in full when the size changes, otherwise diffs
+           it against the last one and repaints just the changed runs)
 ```
 
 ## Running
 
-Requires Erlang/OTP 25+ and a terminal at least 85 columns by 75 rows: the renderer addresses cells absolutely and does not measure the terminal.
+Requires Erlang/OTP 25+. The renderer reads the terminal size on every frame and scales the 40x40 world down to fit, so resizing the window takes effect on the next tick. Below 20 columns or 10 rows it shows "Terminal too small". When the size cannot be read (stdin and stdout both not a terminal) it assumes 85x75.
 
 ```bash
 make run

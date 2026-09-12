@@ -4,14 +4,17 @@
 -define(HIDE, "\e[?25l").
 -define(PARK, "\e[75;1H\e[?25h").
 -define(SCREEN_ROWS, 75).
--define(GRID_TOP_ROW, 4).
+-define(GRID_TOP_ROW, 3).
 -define(GRID_LEFT_COL, 4).
 
 -define(assertShows(Rows, Text), ?assertNotEqual(nomatch, string:find(Rows, Text))).
 -define(assertHides(Rows, Text), ?assertEqual(nomatch, string:find(Rows, Text))).
 
 capturing_io(Start) ->
-    CapturePid = test_support:capture_io(),
+    capturing_io(unsized, Start).
+
+capturing_io(Size, Start) ->
+    CapturePid = test_support:capture_io(Size),
     OldLeader = erlang:group_leader(),
     erlang:group_leader(CapturePid, self()),
     DisplayPid = Start(),
@@ -85,6 +88,8 @@ csi([Char | Rest], Acc) ->
 
 csi_op(Params, $H, Screen) ->
     Screen#{cursor := cursor_of(Params)};
+csi_op("2", $J, Screen) ->
+    Screen#{cells := #{}};
 csi_op(_Params, $K, Screen) ->
     erase_right(Screen);
 csi_op("0", $m, Screen) ->
@@ -213,7 +218,7 @@ goblins(Count, Y) ->
 first_update_paints_the_whole_frame_test() ->
     Text = run_frames([rich_world()]),
     ?assertEqual(1, length(updates(Text))),
-    ?assert(lists:prefix(?HIDE ++ "\e[1;1H", Text)),
+    ?assert(lists:prefix(?HIDE ++ "\e[H\e[2J", Text)),
     Screen = screen_of(Text),
     Rows = screen_text(Screen),
     ?assertEqual([1], row_holding(Screen, "=== CMD RPG [7 moves] ===")),
@@ -237,7 +242,7 @@ first_update_paints_the_whole_frame_test() ->
     ?assertEqual(40, length(GridRows)),
     lists:foreach(fun(Line) -> ?assertEqual(84, length(Line)) end, GridRows),
     ?assertEqual(2, length([Line || Line <- screen_rows(Screen), border_row(Line)])),
-    ?assertEqual([3, 44], row_holding(Screen, "+---")).
+    ?assertEqual([2, 43], row_holding(Screen, "+---")).
 
 first_update_erases_everything_the_terminal_already_showed_test() ->
     Text = run_frames([world(#{log => ["one"]})]),
@@ -287,23 +292,22 @@ start_paints_nothing_before_the_first_render_test() ->
     send_render(DisplayPid, world(#{moves => 2})),
     await_updates(CapturePid, 1),
     Text = stop_and_read(CapturePid, DisplayPid),
-    ?assert(lists:prefix(?HIDE ++ "\e[1;1H", Text)),
+    ?assert(lists:prefix(?HIDE ++ "\e[H\e[2J", Text)),
     ?assertShows(screen_text(screen_of(Text)), "=== CMD RPG [2 moves] ===").
 
 each_display_paints_its_own_first_frame_in_full_test() ->
     First = run_frames([world(#{moves => 1})]),
     Second = run_frames([world(#{moves => 1})]),
     ?assertEqual(First, Second),
-    ?assertEqual(1, occurrences(Second, "\e[1;1H")).
+    ?assertEqual(1, occurrences(Second, "\e[2J")).
 
 first_update_is_the_only_full_repaint_test() ->
     Text = run_frames([rich_world(),
                        maps:merge(rich_world(), #{moves => 8}),
                        maps:merge(rich_world(), #{moves => 9})]),
-    ?assertEqual(1, occurrences(Text, "\e[1;1H")),
-    ?assertEqual(0, occurrences(Text, "\e[H")),
+    ?assertEqual(1, occurrences(Text, "\e[H")),
     ?assertEqual(0, occurrences(Text, "\e[J")),
-    ?assertEqual(0, occurrences(Text, "\e[2J")).
+    ?assertEqual(1, occurrences(Text, "\e[2J")).
 
 every_tick_puts_one_bracketed_update_on_the_wire_test() ->
     Worlds = [world(#{moves => N}) || N <- lists:seq(1, 20)],
@@ -350,7 +354,7 @@ assert_far_apart_changes_repaint_only_their_cells() ->
                     moves => 4}),
     Inns = maps:merge(Shops, #{shops => [], inns => maps:get(shops, Shops)}),
     Blue = "\e[0m\e[1m\e[34mH \e[0m",
-    ?assertEqual("\e[24;4H" ++ Blue ++ "\e[24;82H" ++ Blue ++ ?PARK,
+    ?assertEqual("\e[23;4H" ++ Blue ++ "\e[23;82H" ++ Blue ++ ?PARK,
                  lists:flatten(last_update(run_frames([Shops, Inns])))).
 
 the_screen_matches_a_full_repaint_of_the_same_world_test() ->
@@ -400,14 +404,14 @@ hp_colour_changes_exactly_at_a_third_and_two_thirds_test() ->
 every_part_keeps_its_colour_through_a_differential_repaint_test() ->
     {Busy, Quiet} = styled_worlds(),
     QuietScreen = screen_of(run_frames([Busy, Quiet])),
-    ?assertEqual(styled_table() ++ [{56, [{"", "    "}, {"\e[2m", "> (quiet...)"}]}],
+    ?assertEqual(styled_table() ++ [{52, [{"", "    "}, {"\e[2m", "> (quiet...)"}]}],
                  table_of(QuietScreen)),
     lists:foreach(fun(Row) ->
         ?assertEqual({"\e[2m", $|}, cell_at(QuietScreen, Row, 3)),
         ?assertEqual({"\e[2m", $|}, cell_at(QuietScreen, Row, 84))
     end, lists:seq(?GRID_TOP_ROW, ?GRID_TOP_ROW + 39)),
     BusyScreen = screen_of(run_frames([Quiet, Busy])),
-    ?assertEqual([{"", "    "}, {"\e[2m", "> "}, {"", "one"}], style_runs(BusyScreen, 56)).
+    ?assertEqual([{"", "    "}, {"\e[2m", "> "}, {"", "one"}], style_runs(BusyScreen, 52)).
 
 styled_worlds() ->
     LeaderPid = test_support:fake_pid(),
@@ -434,29 +438,29 @@ styled_table() ->
     Dim = "\e[2m",
     Dot = {Dim, ". "},
     [{1, [{"\e[1m\e[36m", "=== CMD RPG [2 moves] ==="}]},
-     {3, [{"", "  "}, {Dim, "+" ++ lists:duplicate(81, $-) ++ "+"}]},
-     {5, [{"", "  "}, {Dim, "|. "}, {"\e[1m\e[35m", "& "}, Dot, {"\e[1m\e[32m", "@ "}, Dot,
+     {2, [{"", "  "}, {Dim, "+" ++ lists:duplicate(81, $-) ++ "+"}]},
+     {4, [{"", "  "}, {Dim, "|. "}, {"\e[1m\e[35m", "& "}, Dot, {"\e[1m\e[32m", "@ "}, Dot,
           {"\e[1m\e[31m", "! "}, Dot, {"\e[1m\e[33m", "$ "}, Dot, {"\e[1m\e[34m", "H "}, Dot,
           {"\e[2m\e[36m", "+ "}, {Dim, lists:append(lists:duplicate(28, ". ")) ++ "|"}]},
-     {44, [{"", "  "}, {Dim, "+" ++ lists:duplicate(81, $-) ++ "+"}]},
-     {45, [{"", "  "}, {"\e[1m\e[32m", "@ "}, {"", "Hero  "}, {"\e[1m\e[32m", "& "},
+     {43, [{"", "  "}, {Dim, "+" ++ lists:duplicate(81, $-) ++ "+"}]},
+     {44, [{"", "  "}, {"\e[1m\e[32m", "@ "}, {"", "Hero  "}, {"\e[1m\e[32m", "& "},
            {"", "Party  "}, {"\e[1m\e[31m", "! "}, {"", "Enemy  "}, {"\e[1m\e[33m", "$ "},
            {"", "Shop  "}, {"\e[1m\e[34m", "H "}, {"", "Inn"}]},
-     {47, [{"", "  "}, {"\e[1m\e[36m", "Heroes:"}]},
-     {48, [{"", "  "}, {"\e[1m\e[36m", "--- Party: Aldric + Brom ---"}]},
-     {49, [{"", "    "}, {"\e[36m", "& "}, {"\e[1m", "Aldric"}, {"", " (Hum) Lv5  "},
+     {45, [{"", "  "}, {"\e[1m\e[36m", "Heroes:"}]},
+     {46, [{"", "  "}, {"\e[1m\e[36m", "--- Party: Aldric + Brom ---"}]},
+     {47, [{"", "    "}, {"\e[36m", "& "}, {"\e[1m", "Aldric"}, {"", " (Hum) Lv5  "},
            {"\e[32m", "HP:40/40"}, {"", "  XP:0/11  "}, {"\e[33m", "12g"},
            {"", " +2ATK +3DEF"}]},
-     {50, [{"", "      "}, {Dim, "+ "}, {"\e[1m", "Brom"}, {"", " (Dwf) Lv3  "},
+     {48, [{"", "      "}, {Dim, "+ "}, {"\e[1m", "Brom"}, {"", " (Dwf) Lv3  "},
            {"\e[33m", "HP:9/20"}, {"", "  XP:0/7  "}, {"\e[33m", "3g"}]},
-     {52, [{"", "    "}, {"\e[32m", "@ "}, {"\e[1m", "Elara"}, {"", " (Hum) Lv2  "},
+     {49, [{"", "    "}, {"\e[32m", "@ "}, {"\e[1m", "Elara"}, {"", " (Hum) Lv2  "},
            {"\e[32m", "HP:19/20"}, {"", "  XP:0/5  "}, {"\e[33m", "7g"}]},
-     {53, [{"", "  "}, {"\e[2m\e[31m", "Enemies on map: 1"}]},
-     {55, [{"", "  "}, {"\e[1m\e[33m", "Log:"}]}].
+     {50, [{"", "  "}, {"\e[2m\e[31m", "Enemies on map: 1"}]},
+     {51, [{"", "  "}, {"\e[1m\e[33m", "Log:"}]}].
 
 table_of(Screen) ->
     [{Row, style_runs(Screen, Row)}
-     || Row <- painted_rows(Screen), Row < ?GRID_TOP_ROW orelse Row > 43 orelse Row =:= 5].
+     || Row <- painted_rows(Screen), Row < ?GRID_TOP_ROW orelse Row > 42 orelse Row =:= 4].
 
 style_runs(Screen, Row) ->
     Cells = [cell_at(Screen, Row, Col) || Col <- lists:seq(1, row_width(Screen, Row))],
@@ -558,3 +562,162 @@ every_update_hides_and_parks_the_cursor_test() ->
     end, updates(Text)),
     Screen = screen_of(Text),
     ?assertEqual([], [Row || Row <- painted_rows(Screen), Row >= 75]).
+
+run_sized(Steps) ->
+    [{FirstSize, _} | _] = Steps,
+    {CapturePid, DisplayPid} = capturing_io(FirstSize, fun() -> display:start(fake_world, 40) end),
+    lists:foldl(fun({Size, World}, Sent) ->
+        test_support:resize(CapturePid, Size),
+        send_render(DisplayPid, World),
+        await_updates(CapturePid, Sent + 1),
+        Sent + 1
+    end, 0, Steps),
+    stop_and_read(CapturePid, DisplayPid).
+
+hero_at(Name, Level, Role, {X, Y}) ->
+    solo_hero(Name, #{level => Level, party_role => Role, x => X, y => Y}).
+
+heroes_in_parties(Pairs) ->
+    Names = ["Aldric", "Brom", "Cedric", "Durnir", "Elara", "Nyx"],
+    Pids = [test_support:fake_pid() || _ <- Names],
+    Roles = [role_in_pairs(Index, Pairs) || Index <- lists:seq(1, 6)],
+    maps:from_list([{Pid, party_info(hero_at(Name, 1, Role, {Index, Index}), Role, Pid, Pids)}
+                    || {Index, {Name, Pid, Role}} <- lists:enumerate(lists:zip3(Names, Pids, Roles))]).
+
+role_in_pairs(Index, Pairs) when Index > 2 * Pairs -> solo;
+role_in_pairs(Index, _Pairs) when Index rem 2 =:= 1 -> leader;
+role_in_pairs(_Index, _Pairs) -> follower.
+
+party_info(Info, leader, Pid, Pids) ->
+    Info#{follower_pids => [next_pid(Pid, Pids)]};
+party_info(Info, _Role, _Pid, _Pids) ->
+    Info.
+
+next_pid(Pid, [Pid, Next | _]) -> Next;
+next_pid(Pid, [_ | Rest]) -> next_pid(Pid, Rest).
+
+town_world(Pairs, Log) ->
+    world(#{characters => heroes_in_parties(Pairs), enemies => goblins(12, 30),
+            shops => [#{name => "S" ++ [Char], x => 30, y => Y} || {Char, Y} <- [{$a, 1}, {$b, 2}, {$c, 3}]],
+            inns => [#{name => "I" ++ [Char], x => 35, y => Y} || {Char, Y} <- [{$a, 1}, {$b, 2}]],
+            log => Log, moves => 3}).
+
+events(Count) ->
+    [lists:flatten(io_lib:format("ev~2..0b", [N])) || N <- lists:seq(1, Count)].
+
+log_rows(Screen) ->
+    [{Row, row_text(Screen, Row)} || Row <- row_holding(Screen, "    > ")].
+
+assert_within(Screen, Cols, Rows) ->
+    ?assertEqual([], [Row || Row <- painted_rows(Screen), Row >= Rows]),
+    ?assertEqual([], [Row || Row <- painted_rows(Screen), row_width(Screen, Row) > Cols]).
+
+an_80x24_terminal_shows_every_section_test() ->
+    Text = run_sized([{{80, 24}, town_world(0, [])}]),
+    ?assert(lists:prefix(?HIDE ++ "\e[H\e[2J", Text)),
+    ?assert(lists:suffix("\e[24;1H\e[?25h", Text)),
+    Screen = screen_of(Text),
+    Border = "  +-------------+",
+    ?assertEqual(["=== CMD RPG [3 moves] ===", Border],
+                 [row_text(Screen, Row) || Row <- [1, 2]]),
+    ?assert(lists:all(fun(Row) -> grid_row(row_text(Screen, Row)) andalso
+                                  length(row_text(Screen, Row)) =:= 16 end,
+                      lists:seq(3, 8))),
+    ?assertEqual([Border, "  @ Hero  & Party  ! Enemy  $ Shop  H Inn", "  Heroes:"],
+                 [row_text(Screen, Row) || Row <- [9, 10, 11]]),
+    ?assert(lists:all(fun(Row) -> lists:prefix("    @ ", row_text(Screen, Row)) end,
+                      lists:seq(12, 17))),
+    ?assertEqual(["  Enemies on map: 12", "  Log:", "    > (quiet...)"],
+                 [row_text(Screen, Row) || Row <- [18, 19, 20]]),
+    assert_within(Screen, 80, 24).
+
+the_log_truncates_to_the_rows_that_are_left_test() ->
+    Log = events(12),
+    Solo = screen_of(run_sized([{{80, 24}, town_world(0, Log)}])),
+    ?assertEqual([{20, "    > ev09"}, {21, "    > ev10"}, {22, "    > ev11"}, {23, "    > ev12"}],
+                 log_rows(Solo)),
+    OneParty = screen_of(run_sized([{{80, 24}, town_world(1, Log)}])),
+    ?assertEqual([{21, "    > ev10"}, {22, "    > ev11"}, {23, "    > ev12"}], log_rows(OneParty)),
+    Parties = screen_of(run_sized([{{80, 24}, town_world(3, Log)}])),
+    ?assertEqual([{23, "    > ev12"}], log_rows(Parties)),
+    lists:foreach(fun(Name) -> ?assertShows(screen_text(Parties), " " ++ Name ++ " (") end,
+                  ["Aldric", "Brom", "Cedric", "Durnir", "Elara", "Nyx"]),
+    assert_within(Parties, 80, 24).
+
+fold_cell(Heroes, Extra) ->
+    World = maps:merge(world(#{characters => maps:from_list([{test_support:fake_pid(), Hero}
+                                                             || Hero <- Heroes])}), Extra),
+    Screen = screen_of(run_sized([{{80, 24}, World}])),
+    {cell_at(Screen, 3, 4), cell_at(Screen, 3, 6)}.
+
+several_world_cells_fold_into_one_drawn_cell_test() ->
+    Things = #{enemies => #{test_support:fake_pid() => test_support:enemy_info(#{x => 6, y => 6})},
+               shops => [#{name => "Shop", x => 7, y => 0}]},
+    Lv1 = hero_at("Low", 1, solo, {0, 0}),
+    ?assertEqual({{"\e[1m\e[32m", $@}, {"\e[1m\e[33m", $$}}, fold_cell([Lv1], Things)),
+    Lv5 = hero_at("High", 5, solo, {3, 3}),
+    ?assertMatch({{"\e[1m\e[35m", $@}, _}, fold_cell([Lv1, Lv5], Things)),
+    Leader = hero_at("Lead", 1, leader, {0, 0}),
+    ?assertMatch({{"\e[1m\e[32m", $&}, _}, fold_cell([Leader, Lv5], #{})),
+    ?assertMatch({{"\e[2m\e[36m", $+}, _}, fold_cell([hero_at("Follow", 5, follower, {0, 0})], #{})).
+
+a_large_terminal_shows_the_world_one_to_one_test() ->
+    World = maps:merge(town_world(0, events(15)), #{moves => 7}),
+    LargeText = run_sized([{{85, 75}, World}]),
+    ?assert(lists:suffix("\e[75;1H\e[?25h", LargeText)),
+    Large = screen_of(LargeText),
+    ?assertEqual(40, length([Line || Line <- screen_rows(Large), grid_row(Line)])),
+    ?assertEqual([85, 85], [length(Line) || Line <- screen_rows(Large), border_row(Line)]),
+    ?assertEqual(12, length(log_rows(Large))),
+    Wide = screen_of(run_sized([{{120, 40}, World}])),
+    ?assertEqual(20, length([Line || Line <- screen_rows(Wide), grid_row(Line)])),
+    ?assertEqual([45, 45], [length(Line) || Line <- screen_rows(Wide), border_row(Line)]),
+    assert_within(Wide, 120, 40).
+
+resizing_mid_game_re_renders_at_the_new_size_test() ->
+    [W1, W2, W3, W4] = [maps:merge(rich_world(), #{moves => N}) || N <- [1, 2, 3, 4]],
+    Text = run_sized([{{85, 75}, W1}, {{80, 24}, W2}, {{80, 24}, W3}, {{85, 75}, W4}]),
+    [_, Shrunk, Steady, Grown] = updates(Text),
+    ?assert(lists:prefix("\e[H\e[2J", Shrunk)),
+    ?assertEqual(0, occurrences(Steady, "\e[2J")),
+    ?assert(lists:suffix("\e[24;1H\e[?25h", Steady)),
+    ?assert(lists:prefix("\e[H\e[2J", Grown)),
+    AtSmall = screen_of(run_sized([{{85, 75}, W1}, {{80, 24}, W3}])),
+    ?assertEqual(maps:get(cells, screen_of(run_sized([{{80, 24}, W3}]))), maps:get(cells, AtSmall)),
+    ?assertEqual(maps:get(cells, screen_of(run_sized([{{85, 75}, W4}]))),
+                 maps:get(cells, screen_of(Text))).
+
+a_terminal_too_small_gets_a_notice_test() ->
+    World = rich_world(),
+    Text = run_sized([{{80, 24}, World}, {{19, 24}, World}, {{19, 24}, World},
+                      {{19, 24}, maps:merge(World, #{moves => 8})}]),
+    [_, Notice, Quiet1, Quiet2] = updates(Text),
+    ?assert(lists:prefix("\e[H\e[2J", Notice)),
+    ?assertEqual(["\e[24;1H\e[?25h", "\e[24;1H\e[?25h"], [Quiet1, Quiet2]),
+    Screen = screen_of(Text),
+    ?assertEqual([1], painted_rows(Screen)),
+    ?assertEqual("Terminal too small", row_text(Screen, 1)),
+    Short = run_sized([{{80, 9}, World}]),
+    ?assert(lists:suffix("\e[9;1H\e[?25h", Short)),
+    ?assertEqual("Terminal too small", row_text(screen_of(Short), 1)),
+    ?assertEqual("Terminal t", row_text(screen_of(run_sized([{{10, 5}, World}])), 1)),
+    Back = screen_of(run_sized([{{19, 24}, World}, {{80, 24}, World}])),
+    ?assertEqual([1], row_holding(Back, "=== CMD RPG [7 moves] ===")),
+    ?assertHides(screen_text(Back), "Terminal too small").
+
+at_the_minimum_size_the_frame_is_clipped_test() ->
+    Text = run_sized([{{20, 10}, town_world(0, events(3))}]),
+    Screen = screen_of(Text),
+    ?assertEqual(["  +---+", "  +---+"], [row_text(Screen, Row) || Row <- [2, 4]]),
+    ?assert(grid_row(row_text(Screen, 3))),
+    ?assertEqual("  @ Hero  & Party  !", row_text(Screen, 5)),
+    ?assertEqual("  Heroes:", row_text(Screen, 6)),
+    ?assertEqual(lists:seq(1, 9), painted_rows(Screen)),
+    ?assertEqual(20, row_width(Screen, 7)),
+    ?assertEqual(0, occurrences(Text, "\n")),
+    assert_within(Screen, 20, 10).
+
+an_unreadable_size_falls_back_to_85x75_test() ->
+    Text = run_frames([rich_world()]),
+    ?assert(lists:suffix(?PARK, Text)),
+    ?assertEqual(40, length([Line || Line <- screen_rows(screen_of(Text)), grid_row(Line)])).

@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 import collections
+import fcntl
 import os
+import pty
 import queue
 import re
 import signal
+import struct
 import subprocess
 import sys
+import termios
 import threading
 import time
 
@@ -17,12 +21,16 @@ CURSOR_SHOW = b"\x1b[?25h"
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 CSI = re.compile(r"\x1b\[([0-9;?]*)([A-Za-z])")
 HOME = re.compile(rb"\x1b\[(?:1;1)?H")
+BARE_HOME = re.compile(rb"\x1b\[H")
 ERASE_BELOW = re.compile(rb"\x1b\[0?J")
 CLEAR_SCREEN = re.compile(rb"\x1b\[[23]J")
+CLEAR = "\x1b[H\x1b[2J"
+PARK_RE = re.compile(rb"\x1b\[(\d+);1H\x1b\[\?25h$")
 FRAME_ROWS = 74
 FRAME_COLS = 85
 PARK_ROW = 75
 SCREEN_ROWS = PARK_ROW
+RESIZE_SECONDS = 3
 FIRST_UPDATE_LIMIT = 10000
 UPDATE_LIMIT = 6000
 
@@ -184,6 +192,8 @@ class Frame:
                 current_party = party.group(1).split(" + ")
                 self.parties.append(current_party)
             elif hero:
+                if hero.group(2) == "@":
+                    current_party = None
                 parsed = Hero(hero, current_party)
                 self.roster.append(parsed)
                 self.heroes.setdefault(parsed.name, []).append(parsed)
@@ -243,11 +253,11 @@ def hp_colour(hp, max_hp):
 
 
 class Screen:
-    def __init__(self):
+    def __init__(self, cols=FRAME_COLS, rows=PARK_ROW):
         self.rows = collections.defaultdict(dict)
         self.cursor = (1, 1)
         self.style = PLAIN
-        self.first = True
+        self.size = (cols, rows)
 
     def type(self, text):
         row, col = self.cursor
@@ -262,23 +272,26 @@ class Screen:
         self.cursor = (row, col)
 
     def apply(self, update):
+        if update.startswith(CLEAR):
+            self.rows.clear()
+            update = update[len(CLEAR):]
         pos = 0
         for control in CSI.finditer(update):
             self._write(update[pos:control.start()])
             self._control(control.group(1), control.group(2))
             pos = control.end()
         self._write(update[pos:])
-        self.cursor = (PARK_ROW, 1)
+        self.cursor = (self.size[1], 1)
         self.style = PLAIN
-        self.first = False
 
     def _write(self, text):
         if not text:
             return
         row, col = self.cursor
-        if row > FRAME_ROWS or col + len(text) - 1 > FRAME_COLS:
-            raise Failure(f"an update painted {text!r} outside the {FRAME_COLS}x{FRAME_ROWS} "
-                          f"frame, at row {row} column {col}")
+        cols, rows = self.size
+        if row >= rows or col + len(text) - 1 > cols:
+            raise Failure(f"an update painted {text!r} outside the {cols}x{rows} "
+                          f"terminal's frame, at row {row} column {col}")
         cells = self.rows[row]
         for char in text:
             if char < " " or char == "\x7f":
@@ -292,8 +305,6 @@ class Screen:
             self.cursor = position(params)
         elif final == "K" and params in ("", "0"):
             self._erase_right()
-        elif final == "J" and params in ("", "0") and self.first:
-            self._erase_below()
         elif final == "m":
             self._select(params)
         else:
@@ -309,16 +320,11 @@ class Screen:
 
     def _erase_right(self):
         row, col = self.cursor
-        if row > FRAME_ROWS:
+        if row >= self.size[1]:
             raise Failure(f"an update erased row {row}, below the frame")
         cells = self.rows[row]
         for stale in [at for at in cells if at >= col]:
             del cells[stale]
-
-    def _erase_below(self):
-        self._erase_right()
-        for row in [at for at in self.rows if at > self.cursor[0]]:
-            del self.rows[row]
 
     def picture(self):
         return Picture({row: dict(cells) for row, cells in self.rows.items() if cells})
@@ -380,8 +386,7 @@ class ScreenCheck:
         if not re.fullmatch(r"=== CMD RPG \[\d+ moves\] ===", line):
             self.fail(1, "should be the header on the top screen row")
         self.span(1, 1, len(line), BOLD_CYAN, "header")
-        self.exact(2, "")
-        return 3
+        return 2
 
     def _border(self, row):
         if not BORDER_RE.match(self.picture.line(row)):
@@ -406,10 +411,9 @@ class ScreenCheck:
             offset = LEGEND.index(f"{glyph} {word}")
             self.span(row, 3 + offset, 1, style, f"legend {glyph}")
             self.span(row, 5 + offset, len(word), PLAIN, f"legend {word}")
-        self.exact(row + 1, "")
-        self.exact(row + 2, "  Heroes:")
-        self.span(row + 2, 3, 7, BOLD_CYAN, "Heroes:")
-        return row + 3
+        self.exact(row + 1, "  Heroes:")
+        self.span(row + 1, 3, 7, BOLD_CYAN, "Heroes:")
+        return row + 2
 
     def _roster(self, row):
         while not ENEMIES_RE.match(self.picture.line(row)):
@@ -427,8 +431,7 @@ class ScreenCheck:
         row = self._hero(row + 1, 4, "&")
         for _ in range(members - 1):
             row = self._hero(row, 6, "+")
-        self.exact(row, "")
-        return row + 1
+        return row
 
     def _hero(self, row, indent, icon):
         line = self.picture.line(row)
@@ -450,10 +453,9 @@ class ScreenCheck:
 
     def _enemies(self, row):
         self.span(row, 3, len(self.picture.line(row)) - 2, DIM_RED, "enemy count")
-        self.exact(row + 1, "")
-        self.exact(row + 2, "  Log:")
-        self.span(row + 2, 3, 4, BOLD_YELLOW, "Log:")
-        return row + 3
+        self.exact(row + 1, "  Log:")
+        self.span(row + 1, 3, 4, BOLD_YELLOW, "Log:")
+        return row + 2
 
     def _log(self, row):
         first = row
@@ -483,7 +485,7 @@ class ScreenCheck:
         allowed = {icon: {frozenset({"1", level_colour(level)}) for i, level in self.heroes if i == icon}
                    for icon in "@&"}
         for y in range(40):
-            row = 4 + y
+            row = 3 + y
             for x in range(40):
                 col = 4 + 2 * x
                 glyph = self.picture.line(row)[col - 1]
@@ -520,7 +522,7 @@ class Game:
 
     def start(self):
         self.proc = subprocess.Popen(
-            ["make", "run"], cwd=ROOT, stdout=subprocess.PIPE,
+            ["make", "run"], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, bufsize=0)
         self._reset_stream()
         threading.Thread(target=self._pump, daemon=True).start()
@@ -575,13 +577,13 @@ class Game:
     def _check_bytes(self, size, body):
         if FRAME_START in body or CURSOR_SHOW in body:
             raise Failure("an update hid or showed the cursor between its brackets")
-        if CLEAR_SCREEN.search(body):
-            raise Failure("an update cleared the screen")
         if not self.seen_frame:
             self._check_first(size, body)
             return
         if size >= UPDATE_LIMIT:
             raise Failure(f"a later update is {size} bytes, not under {UPDATE_LIMIT}")
+        if CLEAR_SCREEN.search(body):
+            raise Failure("a later update cleared the screen with no size change")
         if HOME.search(body):
             raise Failure("a later update addressed home again: a full repaint")
         if ERASE_BELOW.search(body):
@@ -589,12 +591,13 @@ class Game:
         self.largest_update = max(self.largest_update, size)
 
     def _check_first(self, size, body):
-        if not HOME.match(body):
-            raise Failure("the first update does not start by addressing row 1 column 1")
+        if not body.startswith(CLEAR.encode()):
+            raise Failure("the first update does not start by clearing the screen")
         if size >= FIRST_UPDATE_LIMIT:
             raise Failure(f"the first update is {size} bytes, not under {FIRST_UPDATE_LIMIT}")
-        if len(HOME.findall(body)) != 1 or len(ERASE_BELOW.findall(body)) > 1:
-            raise Failure("the first update holds more than one home or erase-below")
+        if (len(BARE_HOME.findall(body)) != 1 or len(CLEAR_SCREEN.findall(body)) != 1
+                or ERASE_BELOW.search(body)):
+            raise Failure("the first update holds more than one home or clear, or an erase-below")
         self.first_size = size
 
     def stop(self):
@@ -908,12 +911,149 @@ def report_rendering(gen_no, pairs):
     games = [game for game, _engine in pairs if game.first_size]
     if not games:
         return
-    print(f"[gen {gen_no}] smooth rendering ok on {len(games)} worlds: one home address and "
-          f"no clear or erase-below; first update at most {max(g.first_size for g in games)} "
+    print(f"[gen {gen_no}] smooth rendering ok on {len(games)} worlds at the 85x75 fallback: "
+          f"one clear-screen, on the first update, and no erase-below; first update at most {max(g.first_size for g in games)} "
           f"bytes, later updates at most {max(g.largest_update for g in games)} bytes, all "
           f"parked at row 75; only absolute addressing, erase-right and colour; screen never "
           f"stale, always well-formed and correctly coloured; tallest frame "
           f"{max(g.tallest for g in games)} rows", flush=True)
+
+
+class PtyGame:
+    def __init__(self, cols, rows):
+        self.master, slave = pty.openpty()
+        self.data = b""
+        self.seen = 0
+        self.lock = threading.Lock()
+        self._size(cols, rows)
+        self.proc = subprocess.Popen(["make", "-s", "run"], cwd=ROOT, stdin=slave, stdout=slave,
+                                     stderr=slave, start_new_session=True)
+        os.close(slave)
+        threading.Thread(target=self._pump, daemon=True).start()
+
+    def _size(self, cols, rows):
+        fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
+    def _pump(self):
+        while True:
+            try:
+                chunk = os.read(self.master, 65536)
+            except OSError:
+                return
+            if not chunk:
+                return
+            with self.lock:
+                self.data += chunk
+
+    def resize(self, cols, rows):
+        self._size(cols, rows)
+        os.killpg(self.proc.pid, signal.SIGWINCH)
+
+    def next_update(self, timeout):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self.lock:
+                pieces = self.data.split(FRAME_START)[1:]
+            complete = [piece for piece in pieces if piece.endswith(CURSOR_SHOW)]
+            if len(complete) > self.seen:
+                self.seen += 1
+                return complete[self.seen - 1]
+            time.sleep(0.02)
+        raise Failure(f"[pty] no update within {timeout}s")
+
+    def await_repaint(self, screen, cols, rows, timeout):
+        deadline = time.time() + timeout
+        while True:
+            update = self.next_update(max(0.1, deadline - time.time()))
+            park = PARK_RE.search(update)
+            if not park:
+                raise Failure(f"[pty] an update did not end with a park: {update[-40:]!r}")
+            body = update[:park.start()].decode("utf-8", "replace")
+            if body.startswith(CLEAR):
+                screen.size = (cols, rows)
+            if int(park.group(1)) != screen.size[1]:
+                raise Failure(f"[pty] an update parked on row {park.group(1)}, not {screen.size[1]}")
+            if len(CLEAR_SCREEN.findall(update)) != int(body.startswith(CLEAR)):
+                raise Failure("[pty] an update cleared the screen other than at its start")
+            screen.apply(body)
+            if body.startswith(CLEAR):
+                return screen.picture()
+            if time.time() > deadline:
+                raise Failure(f"[pty] no full repaint at {cols}x{rows} within {timeout}s")
+
+    def stop(self):
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        self.proc.wait(timeout=5)
+        os.close(self.master)
+
+
+def expect_line(picture, row, check, what):
+    if not check(picture.line(row)):
+        raise Failure(f"[pty] screen row {row} should be {what}: {picture.line(row)!r}\n"
+                      + picture.text())
+
+
+def check_80x24(picture):
+    expect_line(picture, 1, lambda l: HEADER_RE.fullmatch(l), "the header")
+    for row in (2, 9):
+        expect_line(picture, row, lambda l: l == "  +-------------+", "a 17-column border")
+    for row in range(3, 9):
+        expect_line(picture, row, lambda l: re.fullmatch(r"  \|(?:[.@!$H&+] ){6}\|", l),
+                    "a 6-cell grid row")
+    expect_line(picture, 10, lambda l: l == "  " + LEGEND, "the legend")
+    expect_line(picture, 11, lambda l: l == "  Heroes:", "Heroes:")
+    names = {m.group(3) for m in (HERO_RE.match(picture.line(r)) for r in range(12, 21)) if m}
+    if len(names) != 6:
+        raise Failure(f"[pty] the 80x24 roster lists {sorted(names)}, not 6 heroes\n" + picture.text())
+    log_row = picture.lines.index("  Log:") + 1
+    expect_line(picture, log_row - 1, lambda l: ENEMIES_RE.match(l), "the enemy count")
+    expect_line(picture, log_row + 1, lambda l: LOG_RE.match(l), "a log line")
+    expect_line(picture, 24, lambda l: l == "", "the empty park row")
+
+
+def check_notice(picture):
+    expect_line(picture, 1, lambda l: l == "Terminal too small", "the notice")
+    if any(picture.lines[1:]):
+        raise Failure("[pty] the too-small screen shows more than the notice\n" + picture.text())
+
+
+def check_20x10(picture):
+    for row in (2, 4):
+        expect_line(picture, row, lambda l: l == "  +---+", "a 1-cell border")
+    expect_line(picture, 3, lambda l: re.fullmatch(r"  \|[.@!$H&+] \|", l), "the 1-cell grid row")
+    expect_line(picture, 5, lambda l: l == "  @ Hero  & Party  !", "the legend cut at column 20")
+    expect_line(picture, 6, lambda l: l == "  Heroes:", "Heroes:")
+    for row in range(7, 10):
+        expect_line(picture, row, lambda l: len(l) == 20, "a hero line cut at column 20")
+    expect_line(picture, 10, lambda l: l == "", "the empty park row")
+
+
+def check_terminal_sizes():
+    subprocess.run(["make", "-s"], cwd=ROOT, check=True)
+    game = PtyGame(80, 24)
+    try:
+        screen = Screen(80, 24)
+        check_80x24(game.await_repaint(screen, 80, 24, 25))
+        game.resize(85, 75)
+        ScreenCheck(game.await_repaint(screen, 85, 75, RESIZE_SECONDS)).run()
+        game.resize(19, 24)
+        check_notice(game.await_repaint(screen, 19, 24, RESIZE_SECONDS))
+        for _ in range(2):
+            quiet = game.next_update(RESIZE_SECONDS)
+            if quiet != b"\x1b[24;1H\x1b[?25h":
+                raise Failure(f"[pty] a too-small tick wrote more than the park: {quiet!r}")
+        game.resize(20, 10)
+        check_20x10(game.await_repaint(screen, 20, 10, RESIZE_SECONDS))
+        game.resize(80, 24)
+        check_80x24(game.await_repaint(screen, 80, 24, RESIZE_SECONDS))
+    finally:
+        game.stop()
+    print("terminal sizes ok in a pty: 80x24 shows every section, resizes to 85x75, 19x24, "
+          "20x10 and back repaint in full within one tick, the too-small notice ticks only "
+          "park, and nothing is drawn outside the terminal", flush=True)
 
 
 def run_gate_step():
@@ -985,6 +1125,7 @@ def watch_events(gen_no, pairs, shared, deadline):
 
 
 def main():
+    check_terminal_sizes()
     shared = set()
     deadline = time.time() + EVENT_BUDGET
     for gen_no in range(1, GENERATIONS + 1):

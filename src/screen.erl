@@ -1,24 +1,30 @@
 -module(screen).
--export([unpainted/0, update/2]).
-
--define(ROWS, 74).
--define(COLS, 85).
--define(PARK_ROW, 75).
+-export([unpainted/0, update/3]).
 
 -define(HIDE, "\e[?25l").
 -define(SHOW, "\e[?25h").
 -define(RESET, "\e[0m").
 -define(ERASE_RIGHT, "\e[K").
+-define(CLEAR, "\e[H\e[2J").
 
 unpainted() ->
-    lists:duplicate(?ROWS, lists:duplicate(?COLS, dirty)).
+    {unsized, []}.
 
-update(Painted, Lines) ->
-    Now = [cells(Line) || Line <- lists:sublist(Lines, ?ROWS)],
-    {[?HIDE, row_updates(Painted, Now), addr(?PARK_ROW, 1), ?SHOW], Now}.
+update({Size, Painted}, Lines, Size) ->
+    Now = visible(Lines, Size),
+    {[?HIDE, row_updates(Painted, Now), park(Size), ?SHOW], {Size, Now}};
+update(_Screen, Lines, Size) ->
+    Now = visible(Lines, Size),
+    {[?HIDE, ?CLEAR, row_updates([], Now), park(Size), ?SHOW], {Size, Now}}.
 
-cells(Parts) ->
-    lists:sublist(lists:append([part_cells(Part) || Part <- Parts]), ?COLS).
+visible(Lines, {Cols, Rows}) ->
+    [cells(Line, Cols) || Line <- lists:sublist(Lines, Rows - 1)].
+
+park({_Cols, Rows}) ->
+    addr(Rows, 1).
+
+cells(Parts, Cols) ->
+    lists:sublist(lists:append([part_cells(Part) || Part <- Parts]), Cols).
 
 part_cells({Attributes, Text}) ->
     Style = style(Attributes),

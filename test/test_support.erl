@@ -2,7 +2,7 @@
 -export([char_info/0, char_info/1, enemy_info/0, enemy_info/1,
          world_state/0, world_state/1, fake_pid/0, listener_pid/1,
          scripted_states/1, const_state/1, move_recorder/1, collect_moves/1,
-         capture_io/0, captured_text/1, null_group_leader/0, kill/1,
+         capture_io/0, capture_io/1, resize/2, captured_text/1, null_group_leader/0, kill/1,
          eventually/2, flush_mailbox/0]).
 
 char_info() ->
@@ -83,17 +83,33 @@ collect_until(Deadline, Acc) ->
     end.
 
 capture_io() ->
-    spawn(fun() -> capture_loop([]) end).
+    capture_io(unsized).
 
-capture_loop(Acc) ->
+capture_io(Size) ->
+    spawn(fun() -> capture_loop(Size, []) end).
+
+resize(CapturePid, Size) ->
+    CapturePid ! {resize, Size},
+    ok.
+
+capture_loop(Size, Acc) ->
     receive
+        {io_request, From, ReplyAs, {get_geometry, Which}} ->
+            From ! {io_reply, ReplyAs, geometry(Which, Size)},
+            capture_loop(Size, Acc);
         {io_request, From, ReplyAs, Request} ->
             From ! {io_reply, ReplyAs, ok},
-            capture_loop([request_chars(Request) | Acc]);
+            capture_loop(Size, [request_chars(Request) | Acc]);
+        {resize, NewSize} ->
+            capture_loop(NewSize, Acc);
         {get_text, From} ->
             From ! {captured_text, lists:flatten(lists:reverse(Acc))},
-            capture_loop(Acc)
+            capture_loop(Size, Acc)
     end.
+
+geometry(columns, {Cols, _Rows}) -> Cols;
+geometry(rows, {_Cols, Rows}) -> Rows;
+geometry(_Which, unsized) -> {error, enotsup}.
 
 request_chars({put_chars, Chars}) -> Chars;
 request_chars({put_chars, _Encoding, Chars}) -> Chars;
