@@ -41,6 +41,18 @@ healed_hero_leaves_inn_test() ->
     ?assert(length(Moves) > 5),
     ?assert(count(east, Moves) > length(Moves) div 2).
 
+hero_below_three_quarters_hp_stays_at_inn_test() ->
+    Info = test_support:char_info(#{at_inn => true, hp => 29, max_hp => 40, gold => 0}),
+    Moves = run_decider(Info, view([{8, 5}], [], []), 80),
+    ?assert(length(Moves) > 5),
+    ?assertEqual([stay], lists:usort(Moves)).
+
+hero_at_three_quarters_hp_leaves_inn_test() ->
+    Info = test_support:char_info(#{at_inn => true, hp => 30, max_hp => 40, gold => 0}),
+    Moves = run_decider(Info, view([{8, 5}], [], []), 80),
+    ?assert(length(Moves) > 5),
+    ?assert(count(east, Moves) > length(Moves) div 2).
+
 hurt_rich_hero_seeks_shop_test() ->
     Info = test_support:char_info(#{hp => 10, max_hp => 40, gold => 10}),
     Moves = run_decider(Info, view([{20, 20}], [{8, 5}], []), 80),
@@ -52,6 +64,18 @@ hurt_poor_hero_seeks_inn_test() ->
     Moves = run_decider(Info, view([{20, 20}], [], [{5, 2}]), 80),
     ?assert(length(Moves) > 5),
     ?assert(count(north, Moves) > length(Moves) div 2).
+
+hurt_hero_with_five_gold_seeks_shop_test() ->
+    Info = test_support:char_info(#{hp => 10, max_hp => 40, gold => 5}),
+    Moves = run_decider(Info, view([{20, 20}], [{8, 5}], [{2, 5}]), 80),
+    ?assert(length(Moves) > 5),
+    ?assert(count(east, Moves) > length(Moves) div 2).
+
+hurt_hero_with_four_gold_seeks_inn_test() ->
+    Info = test_support:char_info(#{hp => 10, max_hp => 40, gold => 4}),
+    Moves = run_decider(Info, view([{20, 20}], [{8, 5}], [{2, 5}]), 80),
+    ?assert(length(Moves) > 5),
+    ?assert(count(west, Moves) > length(Moves) div 2).
 
 leader_hunts_enemy_test() ->
     Info = test_support:char_info(#{hp => 40, max_hp => 40, gold => 0,

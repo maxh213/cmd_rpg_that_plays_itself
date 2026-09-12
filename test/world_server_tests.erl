@@ -458,6 +458,21 @@ party_check_runs_every_ten_moves_test() ->
     ?assertEqual([], log_of(S1)),
     ?assertEqual(solo, maps:get(party_role, char_at(Pid1, S1))).
 
+party_check_skips_moves_between_cycles_test() ->
+    Pid1 = test_support:fake_pid(),
+    Pid2 = test_support:fake_pid(),
+    MoverPid = test_support:fake_pid(),
+    Chars = #{
+        Pid1 => test_support:char_info(#{name => "One", x => 6, y => 5, inn_ticks => 5}),
+        Pid2 => test_support:char_info(#{name => "Two", x => 6, y => 5, inn_ticks => 5}),
+        MoverPid => test_support:char_info(#{name => "Mover", x => 0, y => 0})},
+    Inn = [#{name => "Cycle Inn", x => 6, y => 5}],
+    State0 = test_support:world_state(#{characters => Chars, inns => Inn, move_count => 15}),
+    {noreply, S1} = move_cast(MoverPid, east, State0),
+    ?assertEqual([], log_of(S1)),
+    ?assertEqual(solo, maps:get(party_role, char_at(Pid1, S1))),
+    ?assertEqual(solo, maps:get(party_role, char_at(Pid2, S1))).
+
 followers_do_not_form_parties_test() ->
     Pid1 = test_support:fake_pid(),
     Pid2 = test_support:fake_pid(),
