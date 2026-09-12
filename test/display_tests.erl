@@ -659,7 +659,22 @@ several_world_cells_fold_into_one_drawn_cell_test() ->
     ?assertMatch({{"\e[1m\e[35m", $@}, _}, fold_cell([Lv1, Lv5], Things)),
     Leader = hero_at("Lead", 1, leader, {0, 0}),
     ?assertMatch({{"\e[1m\e[32m", $&}, _}, fold_cell([Leader, Lv5], #{})),
-    ?assertMatch({{"\e[2m\e[36m", $+}, _}, fold_cell([hero_at("Follow", 5, follower, {0, 0})], #{})).
+    ?assertMatch({{"\e[2m\e[36m", $+}, _}, fold_cell([hero_at("Follow", 5, follower, {0, 0})], #{})),
+    Lv3 = hero_at("Mid", 3, solo, {1, 1}),
+    ?assertMatch({{"\e[1m\e[35m", $@}, _}, fold_cell([Lv3, Lv5], #{})),
+    Leaders = [hero_at("LeadMid", 3, leader, {0, 0}), hero_at("LeadHigh", 5, leader, {2, 2})],
+    ?assertMatch({{"\e[1m\e[35m", $&}, _}, fold_cell(Leaders, #{})),
+    ?assertEqual([{"\e[2m\e[36m", $+}, {"\e[1m\e[31m", $!}, {"\e[1m\e[33m", $$}], ladder_cells()).
+
+ladder_cells() ->
+    Ladder = #{enemies => maps:from_list([{test_support:fake_pid(), test_support:enemy_info(#{x => X, y => 1})}
+                                          || X <- [1, 7]]),
+               shops => [#{name => "S" ++ [Char], x => X, y => 2} || {Char, X} <- [{$a, 8}, {$b, 14}]],
+               inns => [#{name => "Inn", x => 15, y => 3}]},
+    World = maps:merge(world(#{characters => #{test_support:fake_pid() =>
+                                                   hero_at("Follow", 1, follower, {0, 0})}}), Ladder),
+    Screen = screen_of(run_sized([{{80, 24}, World}])),
+    [cell_at(Screen, 3, Col) || Col <- [4, 6, 8]].
 
 a_large_terminal_shows_the_world_one_to_one_test() ->
     World = maps:merge(town_world(0, events(15)), #{moves => 7}),
@@ -672,7 +687,11 @@ a_large_terminal_shows_the_world_one_to_one_test() ->
     Wide = screen_of(run_sized([{{120, 40}, World}])),
     ?assertEqual(20, length([Line || Line <- screen_rows(Wide), grid_row(Line)])),
     ?assertEqual([45, 45], [length(Line) || Line <- screen_rows(Wide), border_row(Line)]),
-    assert_within(Wide, 120, 40).
+    assert_within(Wide, 120, 40),
+    Even = screen_of(run_sized([{{84, 75}, World}])),
+    ?assertEqual(20, length([Line || Line <- screen_rows(Even), grid_row(Line)])),
+    ?assertEqual([45, 45], [length(Line) || Line <- screen_rows(Even), border_row(Line)]),
+    assert_within(Even, 84, 75).
 
 resizing_mid_game_re_renders_at_the_new_size_test() ->
     [W1, W2, W3, W4] = [maps:merge(rich_world(), #{moves => N}) || N <- [1, 2, 3, 4]],
