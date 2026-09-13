@@ -572,7 +572,7 @@ class Game:
         self._check_bytes(len(piece), body)
         self.screen.apply(body.decode("utf-8", "replace"))
         self.seen_frame = True
-        self.frames.put(self.screen.picture())
+        self.frames.put((self.screen.picture(), time.time()))
 
     def _check_bytes(self, size, body):
         if FRAME_START in body or CURSOR_SHOW in body:
@@ -627,11 +627,12 @@ class Game:
     def _frame(self, item):
         if item is None:
             raise Failure(f"[{self.label}] {self.exit_reason}")
+        picture, arrived_at = item
         try:
-            last_row = ScreenCheck(item).run()
-            frame = Frame(item.text(), time.time())
+            last_row = ScreenCheck(picture).run()
+            frame = Frame(picture.text(), arrived_at)
         except Failure as problem:
-            raise Failure(f"[{self.label}] {problem}\n{item.text()}")
+            raise Failure(f"[{self.label}] {problem}\n{picture.text()}")
         if self.last_moves is not None and frame.moves < self.last_moves:
             raise Failure(f"[{self.label}] move counter went backwards")
         self.last_moves = frame.moves
@@ -1168,6 +1169,189 @@ def check_log_room():
           "listed and no leftover text", flush=True)
 
 
+SONAR_BASE = "4d3b0d8"
+SONAR_DIR = "/tmp/sonar-clean-qa"
+ORACLE_SHA = "e284054e5242e0370c6e12cf0e1722aa1c4114556bd2bb2c1f9333542c59980b"
+ORACLE_LINES = 105
+ORACLE_SHAPES = 16
+ORACLE_MARKERS = [
+    "Ann slew Rat(Lv1) [+2XP +5g]", "Ann hit Troll (-2HP)", "Ann hit by Troll",
+    "Ann was mauled by Dragon!", "Lea's party slew Ogre(Lv5)", "Lea's party hit Ogre",
+    "Fay hit by Ogre", "Lea hit by Ogre", "Lea was slain by Ogre! Party disbanded!",
+    "Gus was slain by Ogre!", "Ann defeated Bob! [+1XP]", "Ann clashed with Bob",
+    "screen_diff <<27,91,63,50,53,108,27,91,49,59,49,52,72",
+    "screen_resize <<27,91,63,50,53,108,27,91,72,27,91,50,74"]
+MODULES = ["character", "combat", "display", "enemy", "frame", "rpg_app", "screen", "util",
+           "world", "world_server"]
+TEST_MODULES = ["character_tests", "combat_tests", "display_tests", "enemy_tests", "gate_tests",
+                "rpg_app_tests", "screen_tests", "util_tests", "world_server_tests"]
+LOWER_LAYERS = ["combat", "screen", "util", "frame"]
+LOOSE_SPEC_CMD = r"""awk '/^-spec /{s=1; n=$2} s{print FILENAME":"n":"$0} s&&/\.[[:space:]]*$/{s=0}' src/*.erl \
+  | grep -E '(^|[(,|>[:space:]])(_|any\(\)|term\(\))[[:space:]]*([,)|.]|$)' \
+  | grep -vE 'world_server\.erl:handle_(call|cast|info)\(' || true"""
+ORACLE_SRC = """-module(oracle).
+-export([run/0]).
+c(Name, Lvl, Hp, Atk, Def, X) ->
+    #{name => Name, race => human, level => Lvl, hp => Hp, max_hp => Hp, exp => 0,
+      x => X, y => 5, inventory => [], attack_bonus => Atk, defense_bonus => Def,
+      gold => 0, party_role => solo, party_members => [], follower_pids => [],
+      at_inn => false, inn_ticks => 0}.
+e(Name, Lvl, Hp, X) ->
+    #{name => Name, level => Lvl, hp => Hp, max_hp => Hp, x => X, y => 5, type => enemy}.
+st(Chars, Enemies) ->
+    #{characters => Chars, enemies => Enemies, shops => [], inns => [],
+      event_log => [], move_count => 1}.
+party(L, F1, F2) ->
+    {L#{party_role := leader, follower_pids := [f1, f2], party_members := [F1, F2]},
+     F1#{party_role := follower}, F2#{party_role := follower}}.
+group(LHp, F1Hp, F2Hp, EHp, PDef, ODef) ->
+    {L, F1, F2} = party(c("Lea", 3, LHp, 0, PDef, 4), c("Fay", 2, F1Hp, 0, 0, 4),
+                        c("Gus", 2, F2Hp, 0, 0, 4)),
+    E = (e("Ogre", 5, EHp, 5))#{attack_bonus => 0, defense_bonus => ODef},
+    st(#{lead => L, f1 => F1, f2 => F2}, #{ogre => E}).
+cases() ->
+    [{solo_slay, st(#{hero => c("Ann", 9, 50, 99, 999, 4)}, #{rat => e("Rat", 1, 1, 5)})},
+     {solo_hit, st(#{hero => c("Ann", 1, 50, 0, 999, 4)}, #{rat => e("Troll", 4, 900, 5)})},
+     {solo_hurt, st(#{hero => c("Ann", 1, 900, 0, 0, 4)}, #{rat => (e("Troll", 4, 900, 5))#{defense_bonus => 999}})},
+     {solo_mauled, st(#{hero => c("Ann", 1, 1, 0, 0, 4)}, #{rat => e("Dragon", 6, 900, 5)})},
+     {party_slay, group(50, 50, 50, 1, 999, 0)},
+     {party_hit, group(50, 50, 50, 900, 999, 0)},
+     {party_hurt, group(900, 900, 900, 900, 0, 9999)},
+     {leader_slain, group(1, 1, 1, 900, 0, 9999)}].
+pvp() ->
+    [{pvp_kill, #{a => c("Ann", 9, 50, 99, 999, 4), b => c("Bob", 1, 1, 0, 0, 4)}},
+     {pvp_clash, #{a => c("Ann", 1, 900, 0, 999, 4), b => c("Bob", 1, 900, 0, 0, 4)}}].
+frames() ->
+    Old = [[{[bold], "=== CMD RPG [3 moves] ==="}], [{[red], "E"}, {[], " .. "}, {[green], "@@"}]],
+    New = [[{[bold], "=== CMD RPG [4 moves] ==="}], [{[], ". "}, {[green, bold], "@"}], [{[dim], "Log:"}]],
+    {Old, New}.
+run() ->
+    rand:seed(exsss, {1, 2, 3}),
+    [show(N, world:move(hero_or_lead(S), east, S)) || {N, S} <- cases(), _ <- lists:seq(1, 6)],
+    [show(N, world:render_tick(st(C, #{}))) || {N, C} <- pvp()],
+    {Old, New} = frames(),
+    {_, S1} = screen:update(screen:unpainted(), Old, {80, 24}),
+    [io:format("~p ~w~n", [N, iolist_to_binary(element(1, screen:update(Scr, New, Sz)))])
+     || {N, Scr, Sz} <- [{screen_diff, S1, {80, 24}}, {screen_resize, S1, {20, 10}}]],
+    halt().
+show(N, Result) ->
+    io:format("~p ~kw~n", [N, Result]),
+    [io:format("  ~s~n", [L]) || L <- log_of(Result)].
+log_of({#{event_log := Log}, _}) -> Log;
+log_of({_, Log, _}) -> Log.
+hero_or_lead(#{characters := #{hero := _}}) -> hero;
+hero_or_lead(_) -> lead.
+"""
+EXPORTS_EVAL = ("[io:format(\"~p ~w~n\", [M, lists:sort(M:module_info(exports))]) || M <- [%s]], halt()."
+                % ",".join(MODULES))
+
+
+def sonar_run(cmd, timeout=600, shell=False):
+    result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=timeout,
+                            shell=shell)
+    return result.stdout + result.stderr
+
+
+def sonar_builds():
+    import shutil
+    shutil.rmtree(SONAR_DIR, ignore_errors=True)
+    for build in ("base", "refactor"):
+        os.makedirs(os.path.join(SONAR_DIR, build, "ebin"))
+    with open(os.path.join(SONAR_DIR, "oracle.erl"), "w") as handle:
+        handle.write(ORACLE_SRC)
+    archive = subprocess.run(["git", "archive", SONAR_BASE, "src"], cwd=ROOT, capture_output=True,
+                             check=True).stdout
+    subprocess.run(["tar", "-x", "-C", os.path.join(SONAR_DIR, "base")], input=archive, check=True)
+    oracle = os.path.join(SONAR_DIR, "oracle.erl")
+    sources = {"base": os.path.join(SONAR_DIR, "base", "src"), "refactor": os.path.join(ROOT, "src")}
+    for build, src in sources.items():
+        erls = sorted(os.path.join(src, name) for name in os.listdir(src) if name.endswith(".erl"))
+        subprocess.run(["erlc", "-o", os.path.join(SONAR_DIR, build, "ebin")] + erls + [oracle],
+                       check=True, capture_output=True)
+
+
+def check_oracle():
+    import hashlib
+    outputs = {}
+    for build in ("base", "refactor"):
+        out = subprocess.run(["erl", "-noshell", "-pa", os.path.join(SONAR_DIR, build, "ebin"),
+                              "-s", "oracle", "run"], capture_output=True, timeout=120).stdout
+        with open(os.path.join(SONAR_DIR, build + ".out"), "wb") as handle:
+            handle.write(out)
+        lines = out.decode().splitlines()
+        digest = hashlib.sha256(out).hexdigest()
+        if (len(lines), digest) != (ORACLE_LINES, ORACLE_SHA):
+            raise Failure(f"[sonar] oracle on {build} gave {len(lines)} lines sha256 {digest}, "
+                          f"expected {ORACLE_LINES} lines sha256 {ORACLE_SHA}")
+        outputs[build] = out
+    if outputs["base"] != outputs["refactor"]:
+        raise Failure(f"[sonar] oracle output differs between {SONAR_BASE} and the refactor")
+    text = outputs["refactor"].decode()
+    missing = [marker for marker in ORACLE_MARKERS if marker not in text]
+    shapes = {re.sub(r"[0-9]+", "N", line) for line in text.splitlines() if line.startswith("  ")}
+    if missing or len(shapes) != ORACLE_SHAPES:
+        raise Failure(f"[sonar] oracle misses {missing} or has {len(shapes)} log shapes, "
+                      f"expected {ORACLE_SHAPES}")
+
+
+def check_exports():
+    listings = {build: sonar_run(["erl", "-noshell", "-pa", os.path.join(SONAR_DIR, build, "ebin"),
+                                  "-eval", EXPORTS_EVAL])
+                for build in ("base", "refactor")}
+    if listings["base"] != listings["refactor"] or listings["base"].count("\n") != len(MODULES):
+        raise Failure("[sonar] exports differ from " + SONAR_BASE + ":\n" + listings["refactor"])
+    multi = sonar_run(r"grep -nE '^-export\(\[[a-z_]+/[0-9]+, *[a-z_]+' src/*.erl "
+                      r"| grep -vE '\[([a-z_]+)/[0-9]+(, *\1/[0-9]+)*\]' || true", shell=True)
+    if multi.strip() or sorted(os.listdir(os.path.join(ROOT, "src"))) != sorted(m + ".erl" for m in MODULES):
+        raise Failure("[sonar] multi-function -export lines or module set changed:\n" + multi)
+
+
+def check_specs():
+    loose = sonar_run(LOOSE_SPEC_CMD, shell=True)
+    if loose.strip():
+        raise Failure("[sonar] loose specs:\n" + loose)
+    world = open(os.path.join(ROOT, "src", "world.erl")).read()
+    types = re.findall(r"^-type (world_state|character|enemy)\(\)", world, re.M)
+    lower = [m for m in LOWER_LAYERS
+             if re.search(r"^-spec.*world:", open(os.path.join(ROOT, "src", m + ".erl")).read(), re.M)]
+    if len(types) != 3 or lower:
+        raise Failure(f"[sonar] world.erl types {types}, world: specs below world in {lower}")
+    plt = os.path.join(SONAR_DIR + "-plt", "base.plt")
+    if not os.path.exists(plt):
+        os.makedirs(os.path.dirname(plt), exist_ok=True)
+        sonar_run(["dialyzer", "--build_plt", "--apps", "erts", "kernel", "stdlib",
+                   "--output_plt", plt], timeout=1800)
+    report = sonar_run(["dialyzer", "--plt", plt, "--src", "src"], timeout=1800).strip()
+    if not report.endswith("done (passed successfully)") or "Warning" in report:
+        raise Failure("[sonar] dialyzer not clean:\n" + report[-2000:])
+
+
+def check_existing_tests():
+    ebin = os.path.join(SONAR_DIR, "eunit")
+    os.makedirs(ebin, exist_ok=True)
+    sonar_run("erlc -o %s src/*.erl test/*.erl" % ebin, shell=True)
+    out = sonar_run(["erl", "-noshell", "-pa", ebin, "-eval",
+                     "eunit:test([%s]), halt()." % ",".join(TEST_MODULES)], timeout=600)
+    if "All 145 tests passed." not in out:
+        raise Failure("[sonar] test/ eunit did not print All 145 tests passed.:\n" + out[-2000:])
+
+
+def check_sonar_clean():
+    sonar_builds()
+    check_oracle()
+    print(f"sonar-clean oracle ok: seeded world:move/render_tick/screen:update give {ORACLE_LINES} "
+          f"lines, sha256 {ORACLE_SHA[:8]}..., identical to {SONAR_BASE}, "
+          f"{ORACLE_SHAPES} log shapes with every scenario line", flush=True)
+    check_exports()
+    print(f"sonar-clean exports ok: the ten modules export the same functions as {SONAR_BASE}, "
+          "one function per -export line", flush=True)
+    check_specs()
+    print("sonar-clean specs ok: no loose specs, world_state/character/enemy types, no world: "
+          "specs below world, dialyzer passed", flush=True)
+    check_existing_tests()
+    print("sonar-clean eunit ok: test/ prints All 145 tests passed.", flush=True)
+
+
 def run_gate_step():
     if SKIP_NESTED_GATE:
         print("step 13 skipped (QA_E2E_SKIP_GATE=1)", flush=True)
@@ -1237,6 +1421,9 @@ def watch_events(gen_no, pairs, shared, deadline):
 
 
 def main():
+    check_sonar_clean()
+    if os.environ.get("QA_E2E_ONLY") == "sonar":
+        return
     check_terminal_sizes()
     check_log_room()
     shared = set()
