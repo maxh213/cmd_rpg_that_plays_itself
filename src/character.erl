@@ -152,9 +152,9 @@ break_tie(DX, DY) ->
     end.
 
 -spec step_horizontal(integer()) -> east | west.
-step_horizontal(DX) when DX > 0 -> east;
+step_horizontal(DX) when DX >= 1 -> east;
 step_horizontal(_DX) -> west.
 
 -spec step_vertical(integer()) -> south | north.
-step_vertical(DY) when DY > 0 -> south;
+step_vertical(DY) when DY >= 1 -> south;
 step_vertical(_DY) -> north.

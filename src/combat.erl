@@ -49,7 +49,7 @@ resolve(A, B) ->
     end.
 
 -spec resolve_group([fighter(), ...], fighter()) -> group_result().
-resolve_group(Party, Opponent) when is_list(Party), length(Party) > 0 ->
+resolve_group([_ | _] = Party, Opponent) ->
     TotalDef = lists:sum([maps:get(defense_bonus, M, 0) || M <- Party]),
     TotalAtk = lists:sum([maps:get(attack_bonus, M, 0) || M <- Party]),
     PartyRolls = [roll_survive(maps:get(level, M), maps:get(hp, M)) || M <- Party],

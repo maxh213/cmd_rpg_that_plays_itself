@@ -162,10 +162,7 @@ apply_direction(stay, X, Y)  -> {X, Y}.
 -spec append_log(log(), log()) -> log().
 append_log(Log, Entries) ->
     NewLog = Log ++ Entries,
-    case length(NewLog) > ?LOG_LIMIT of
-        true -> lists:nthtail(length(NewLog) - ?LOG_LIMIT, NewLog);
-        false -> NewLog
-    end.
+    lists:nthtail(max(0, length(NewLog) - ?LOG_LIMIT), NewLog).
 
 -spec render_tick(world_state()) -> clash().
 render_tick(State) ->
