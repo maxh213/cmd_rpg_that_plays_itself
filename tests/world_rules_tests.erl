@@ -87,6 +87,15 @@ damage_to_exactly_zero_hp_mauls_test() ->
     ?assertNot(maps:is_key(hero, maps:get(characters, S))),
     ?assertEqual(["Ann was mauled by Ogre!"], text(maps:get(event_log, S))).
 
+solo_damage_to_exactly_zero_hp_slays_test() ->
+    Guarded = hero(#{defense_bonus => 1000}),
+    Enemies = #{ogre => test_support:enemy_info(#{name => "Ogre", hp => 1, defense_bonus => 100})},
+    {S, _} = step(1, state(#{hero => Guarded}, #{enemies => Enemies})),
+    Log = text(maps:get(event_log, S)),
+    ?assertEqual(#{}, maps:get(enemies, S)),
+    ?assert(has("Ann slew Ogre(Lv1)", Log)),
+    ?assertNot(has("Ann hit", Log)).
+
 party_damage_to_exactly_zero_hp_slays_test() ->
     Leader = hero(#{party_role => leader, defense_bonus => 1000}),
     Enemies = #{ogre => test_support:enemy_info(#{name => "Ogre", hp => 1, defense_bonus => 100})},

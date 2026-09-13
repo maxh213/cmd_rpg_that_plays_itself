@@ -14,6 +14,14 @@ tied_rolls_favour_the_first_fighter_test() ->
     B = fixed_roller(#{name => "B", defense_bonus => 10}),
     ?assertEqual({A, B#{hp := -2}, 1}, combat:resolve(A, B)).
 
+first_fighter_damage_adds_attack_and_roll_test() ->
+    A = fixed_roller(#{name => "A", defense_bonus => 10, attack_bonus => 5}),
+    B = fixed_roller(#{name => "B"}),
+    {Winner, Loser, Dmg} = combat:resolve(A, B),
+    ?assertEqual(A, Winner),
+    ?assert(lists:member(Dmg, [7, 8, 9])),
+    ?assertEqual(B#{hp := -1 - Dmg}, Loser).
+
 second_fighter_damage_subtracts_defence_test() ->
     A = fixed_roller(#{name => "A", defense_bonus => 2}),
     B = fixed_roller(#{name => "B", defense_bonus => 5, attack_bonus => 5}),

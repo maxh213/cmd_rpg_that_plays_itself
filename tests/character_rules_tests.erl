@@ -3,6 +3,8 @@
 
 -define(TOWARD_SEED, 11).
 -define(CHANCE_SEVEN_SEED, 8).
+-define(TIE_EAST_SEED, 10).
+-define(TIE_SOUTH_SEED, 5).
 
 first_move(Seed, Overrides, View) ->
     Info = test_support:char_info(maps:merge(#{hp => 20, max_hp => 20}, Overrides)),
@@ -41,6 +43,11 @@ nearest_enemy_by_manhattan_distance_test() ->
     ?assertEqual(east, first_move(?TOWARD_SEED, #{}, Horizontal)),
     Vertical = #{enemy_positions => [{5, 6}, {9, 0}]},
     ?assertEqual(south, first_move(?TOWARD_SEED, #{}, Vertical)).
+
+diagonal_tie_steps_either_way_by_roll_test() ->
+    Diagonal = #{enemy_positions => [{8, 8}]},
+    ?assertEqual(east, first_move(?TIE_EAST_SEED, #{}, Diagonal)),
+    ?assertEqual(south, first_move(?TIE_SOUTH_SEED, #{}, Diagonal)).
 
 steps_toward_distant_targets_test() ->
     ?assertEqual(south, first_move(?TOWARD_SEED, #{}, #{enemy_positions => [{5, 8}]})),
